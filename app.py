@@ -87,11 +87,13 @@ def calculate_commission(row, policy_map):
 # --- 主处理函数 ---
 def process_data(ledger_file, payment_file, order_file, detail_file, policy_file):
     # 1. 读取所有文件
-    df_ledger = pd.read_excel(ledger_file, dtype=str)
-    df_payment_raw = pd.read_excel(payment_file, dtype=str)
-    df_order = pd.read_excel(order_file, dtype=str)
-    df_detail = pd.read_excel(detail_file, dtype=str)
-    df_policy_raw = pd.read_excel(policy_file, dtype=str)
+        # 1. 读取所有文件
+    # 针对 .xls 格式，必须指定 engine='xlrd'
+    df_ledger = pd.read_excel(ledger_file, dtype=str, engine='xlrd')
+    df_payment_raw = pd.read_excel(payment_file, dtype=str, engine='xlrd')
+    df_order = pd.read_excel(order_file, dtype=str, engine='xlrd')
+    df_detail = pd.read_excel(detail_file, dtype=str, engine='xlrd')
+    df_policy_raw = pd.read_excel(policy_file, dtype=str, engine='xlrd')
     
     # 2. 预处理：建立映射字典
     order_map = {}
