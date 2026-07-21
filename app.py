@@ -1,8 +1,8 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import re
-import io
+import streamlit as st导入 streamlit 作为 st导入 streamlit 作为 st
+import pandas as pd导入 pandas 作为 pd
+import numpy as np导入 numpy 作为 np
+import re导入 re重新导入 re
+import io导入 io
 
 # --- 页面配置 ---
 st.set_page_config(page_title="返佣计算小工具", layout="centered")
@@ -14,24 +14,24 @@ def safe_float(val):
     if pd.isna(val): return 0.0
     s = str(val).strip()
     if s in ['无', 'None', 'nan', '']: return 0.0
-    try: return float(s)
-    except ValueError: return 0.0
+    try: return float(s)尝试: 返回 浮点数(s)
+    except ValueError: return 0.0 except ValueError： 返回 0.0
 
-def clean_order_id(order_id):
-    if pd.isna(order_id): return ''
+def clean_order_id(order_id):定义 清理订单ID(订单ID):
+    if pd.isna(order_id): return ''如果 pd.isna(order_id): 返回 ''
     s = str(order_id).strip()
-    if s.endswith('.0'): s = s[:-2]
+    if s.endswith('.0'): s = s[:-2]如果s.以‘.0’结尾，则 s = s[:-2]
     return s
 
-def parse_xy_product(product_name):
+def parse_xy_product(product_name):定义 parse_xy_product(product_name):
     if pd.isna(product_name): return False, 0, 0
     name_str = str(product_name).strip()
     match = re.search(r'(\d+)\+(\d+)', name_str)
-    if match: return True, int(match.group(1)), int(match.group(2))
-    return False, 0, 0
+    if match: return True, int(match.group(1)), int(match.group(2))    如果匹配，则返回 True，以及 match.group(1) 和 match.group(2) 的整数值
+    return False, 0, 0    返回 False, 0, 0
 
-def count_periods(period_str):
-    if pd.isna(period_str): return 1
+def count_periods(period_str):定义 count_periods(period_str):
+    if pd.isna(period_str): return 1    如果 pd.isna(period_str)，则返回 1
     p_str = str(period_str)
     numbers = re.findall(r'\d+', p_str)
     return max(len(numbers), 1)
