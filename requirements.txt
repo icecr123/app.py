@@ -1,8 +1,5 @@
 streamlit
-pandas
-openpyxl
-streamlit
-pandas
+pandas==1.5.3
 numpy
 openpyxl
 xlrd==1.2.0
