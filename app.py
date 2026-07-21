@@ -221,7 +221,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         policy_start_str = str(policy.get('返佣开始时间', '')).strip()
         
         if order_time_str and order_time_str != 'nan' and policy_start_str and policy_start_str != 'nan':
-            try:
+            try:            尝试：
                 o_date = pd.to_datetime(order_time_str).date()
                 p_date = pd.to_datetime(policy_start_str).date()
                 if o_date < p_date:
