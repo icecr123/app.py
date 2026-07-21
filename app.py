@@ -9,8 +9,9 @@ st.set_page_config(page_title="返佣计算小工具", layout="centered")
 st.title("🧮 月度回款返佣自动计算工具")
 st.markdown("请依次上传以下 5 个文件，工具将自动完成计算并生成结果。")
 
-# --- 你的核心逻辑函数 (已修复) ---
+# --- 核心逻辑函数 (已彻底清洗) ---
 def safe_float(val):
+    """安全转换浮点数"""
     if pd.isna(val):
         return 0.0
     s = str(val).strip()
@@ -22,6 +23,7 @@ def safe_float(val):
         return 0.0
 
 def clean_order_id(order_id):
+    """清洗订单号，去除 .0 后缀"""
     if pd.isna(order_id):
         return ''
     s = str(order_id).strip()
@@ -30,6 +32,7 @@ def clean_order_id(order_id):
     return s
 
 def parse_xy_product(product_name):
+    """解析产品名称中的 x+y 格式"""
     if pd.isna(product_name):
         return False, 0, 0
     name_str = str(product_name).strip()
@@ -39,6 +42,7 @@ def parse_xy_product(product_name):
     return False, 0, 0
 
 def count_periods(period_str):
+    """统计还款期次数量"""
     if pd.isna(period_str):
         return 1
     p_str = str(period_str)
@@ -46,6 +50,7 @@ def count_periods(period_str):
     return max(len(numbers), 1)
 
 def calculate_commission(row, policy_map):
+    """计算单笔返佣"""
     merchant = str(row.get('收款商户', '')).strip()
     product = str(row.get('产品名称', '')).strip()
     period_str = str(row.get('还款期次', '')).strip()
@@ -84,7 +89,7 @@ def calculate_commission(row, policy_map):
         
     return pd.Series([has_comm, f"{ratio:.4f}", round(comm_amount, 2)])
 
-# --- 主处理函数 ---
+# --- 主处理流程 ---
 def process_data(ledger_file, payment_file, order_file, detail_file, policy_file):
     # 1. 读取所有文件
     df_ledger = pd.read_excel(ledger_file, dtype=str)
@@ -207,7 +212,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     df_all['返佣比例'] = comm_results[1]
     df_all['返佣金额'] = comm_results[2]
     
-    # 6. 补充日期备注
+    # 6. 补充日期备注与校验
     def check_date_and_adjust(row):
         order_time_str = str(row.get('下单时间', '')).strip()
         merchant = str(row.get('收款商户', '')).strip()
@@ -221,7 +226,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         policy_start_str = str(policy.get('返佣开始时间', '')).strip()
         
         if order_time_str and order_time_str != 'nan' and policy_start_str and policy_start_str != 'nan':
-            try:            尝试：
+            try:
                 o_date = pd.to_datetime(order_time_str).date()
                 p_date = pd.to_datetime(policy_start_str).date()
                 if o_date < p_date:
@@ -238,15 +243,15 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 # --- 网页界面部分 ---
 # 创建文件上传器
 uploaded_ledger = st.file_uploader("1. 上传《分账支付记录.xls》", type=['xls', 'xlsx'])
-uploaded_payment = st.file_uploader("2. 上传《代付记录.xls》", type=['xls', 'xlsx'])
-uploaded_order = st.file_uploader("3. 上传《订单.xls》", type=['xls', 'xlsx'])
-uploaded_detail = st.file_uploader("4. 上传《订单支付明细.xlsx》", type=['xls', 'xlsx'])
-uploaded_policy = st.file_uploader("5. 上传《返佣政策详情.xls》", type=['xls', 'xlsx'])
+uploaded_payment = st.file_uploader("2. 上传《代付记录.xls》"上传的付款 = st.file_uploader("2. 上传《代付记录.xls》", type=['xls', 'xlsx'])
+uploaded_order = st.file_uploader("3. 上传《订单.xls》"上传的订单 = st.file_uploader("3. 上传《订单.xls》", type=['xls', 'xlsx'])
+uploaded_detail = st.file_uploader("4. 上传《订单支付明细.xlsx》"上传的详情 = st.file_uploader("4. 上传《订单支付明细.xlsx》", type=['xls', 'xlsx'])
+uploaded_policy = st.file_uploader("5. 上传《返佣政策详情.xls》"上传的保单 = st.file_uploader("5. 上传《返佣政策详情.xls》", type=['xls', 'xlsx'])
 
 # 当所有文件都上传后，显示计算按钮
-if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):如果所有([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):
-    if st.button('🚀 开始计算', type='primary'):    如果 st.button(' 开始计算', type='primary')：
-        with st.spinner('数据正在飞速计算中，请稍候...'):        在 st.spinner('数据正在飞速计算中，请稍候...') 的情况下：
+if all全部([ all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):如果所有([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):如果所有([已上传账本、已上传付款、已上传订单、已上传明细、已上传保单]):如果所有([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):如果所有([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):已上传账本、已上传付款、已上传订单、已上传明细、已上传保单]):如果所有([已上传账本、已上传付款、已上传订单、已上传明细、已上传保单]):如果所有([已上传账本、已上传付款、已上传订单、已上传明细、已上传保单]):
+    if st.button('🚀 开始计算', type='primary'):    如果 st.button(' 开始计算'：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算', type='primary'):    如果 st.button(' 开始计算'：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算', type='primary'):    如果 st.button(' 开始计算'：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算'：    如果 st.button(' 开始计算', type='primary')：    如果 st.button(' 开始计算', type='primary')：
+        with st.spinner('数据正在飞速计算中，请稍候...'):        在 st.spinner('数据正在飞速计算中，请稍候...') 的情况下：        在 st.spinner('数据正在飞速计算中，请稍候...') 的情况下：
             try:            尝试：
                 # 调用主函数处理数据
                 result_df = process_data(uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy)
