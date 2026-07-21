@@ -233,23 +233,23 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         return current_remarks
         
     df_all['备注'] = df_all.apply(check_date_and_adjust, axis=1)
-    return df_all
+    return df_all    返回 df_all
 
 # --- 网页界面部分 ---
 # 创建文件上传器
-uploaded_ledger = st.file_uploader文件上传器("1. 上传《分账支付记录.xls》", type=['xls', 'xlsx']), 类型为['xls', 'xlsx'])
-uploaded_payment = st.file_uploader文件上传器("2. 上传《代付记录.xls》", type=['xls', 'xlsx']), 类型为['xls', 'xlsx'])
-uploaded_order = st.file_uploader文件上传器("3. 上传《订单.xls》", type=['xls', 'xlsx']), 类型为['xls', 'xlsx'])
-uploaded_detail = st.file_uploader文件上传器("4. 上传《订单支付明细.xlsx》", type=['xls', 'xlsx']), 类型为['xls', 'xlsx'])
-uploaded_policy = st.file_uploader文件上传器("5. 上传《返佣政策详情.xls》", type=['xls', 'xlsx']), 类型为['xls', 'xlsx'])
+uploaded_ledger = st.file_uploader("1. 上传《分账支付记录.xls》", type=['xls', 'xlsx'])
+uploaded_payment = st.file_uploader("2. 上传《代付记录.xls》", type=['xls', 'xlsx'])
+uploaded_order = st.file_uploader("3. 上传《订单.xls》", type=['xls', 'xlsx'])
+uploaded_detail = st.file_uploader("4. 上传《订单支付明细.xlsx》", type=['xls', 'xlsx'])
+uploaded_policy = st.file_uploader("5. 上传《返佣政策详情.xls》", type=['xls', 'xlsx'])
 
 # 当所有文件都上传后，显示计算按钮
-if all全部([ all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):
-    if st.button('🚀 开始计算', type='primary'):, 类型为'primary'):
-        with st.spinner('数据正在飞速计算中，请稍候...'):
-            try:
+if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):如果所有([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):
+    if st.button('🚀 开始计算', type='primary'):    如果 st.button(' 开始计算', type='primary')：
+        with st.spinner('数据正在飞速计算中，请稍候...'):        在 st.spinner('数据正在飞速计算中，请稍候...') 的情况下：
+            try:            尝试：
                 # 调用主函数处理数据
-                result_df = process_data(uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy)                result_df = process_data(上传的账本、上传的付款记录、上传的订单、上传的明细、上传的保单)
+                result_df = process_data(uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy)
                 
                 # 定义最终输出的标准列头
                 FINAL_COLUMNS = [
@@ -270,10 +270,10 @@ if all全部([ all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_
                 st.download_button(
                     label="💾 点击下载计算结果",
                     data=processed_data,
-                    file_name="月度回款返佣计算结果.xlsx",                    文件名="月度回款返佣计算结果.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"                    MIME类型="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    file_name="月度回款返佣计算结果.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-            except Exception as e:            except 异常 as            except 异常 as e:            except 异常 as e:
+            except Exception as e:
                 st.error(f"计算过程中出现错误：{e}")
 else:
     st.info("请先上传全部 5 个文件。")
