@@ -1,5 +1,5 @@
-import streamlit as st导入 streamlit 作为 st导入 streamlit 作为 st
-import pandas as pd导入 pandas 作为 pd
+import streamlit as st导入 streamlit 作为 st导入 streamlit 作为 st导入 streamlit 作为 st导入 streamlit 作为 st
+import pandas as pd导入 pandas 作为 pd导入 pandas 作为 pd导入 pandas 作为 pd
 import numpy as np导入 numpy 作为 np
 import re导入 re重新导入 re
 import io导入 io
@@ -14,8 +14,8 @@ def safe_float(val):
     if pd.isna(val): return 0.0
     s = str(val).strip()
     if s in ['无', 'None', 'nan', '']: return 0.0
-    try: return float(s)尝试: 返回 浮点数(s)
-    except ValueError: return 0.0 except ValueError： 返回 0.0
+    try: return float(s)尝试: 返回 浮点数(s)尝试: 返回 浮点数(s)尝试: 返回 浮点数(s)
+      except ValueError: return 0.0
 
 def clean_order_id(order_id):定义 清理订单ID(订单ID):
     if pd.isna(order_id): return ''如果 pd.isna(order_id): 返回 ''
