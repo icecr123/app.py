@@ -88,7 +88,48 @@ def main():
             df_order_main = pd.read_excel(file_order_main)
             df_order_detail = pd.read_excel(file_order_detail)
             df_policy = pd.read_excel(file_policy)
+            # ================= 【新增】万能列名修复补丁 =================
+            # 这一步是为了防止 Excel 表头名字不一样导致 KeyError
+            
+            # 1. 统一【订单支付明细】的列名
+            if '业务订单号' in df_order_detail.columns:
+                df_order_detail.rename(columns={'业务订单号': '订单编号'}, inplace=True)
+            
+            # 2. 统一【代付记录】的列名
+            if '订单编号' in df_payment.columns:
+                df_payment.rename(columns={'订单编号': '业务订单号'}, inplace=True)
 
+            # 3. 统一【订单主表】的列名
+            if '业务订单号' in df_order_main.columns:
+                df_order_main.rename(columns={'业务订单号': '订单编号'}, inplace=True)
+            
+            # ================= 【核心】生成序号与双键匹配逻辑 =================
+            
+            # A. 处理【订单支付明细】(作为查找字典)
+            # 清洗订单号，去除 .0
+            df_order_detail['订单编号'] = df_order_detail['订单编号'].astype(str).str.strip().str.replace('.0', '', regex=False)
+            # 生成组内序号 (第1笔, 第2笔...)
+            df_order_detail['组内序号'] = df_order_detail.groupby('订单编号').cumcount() + 1
+            
+            # 构建查找字典：key是(订单号, 序号)，value是还款类型
+            detail_lookup = dict(zip(
+                zip(df_order_detail['订单编号'], df_order_detail['组内序号']),
+                df_order_detail['还款类型'] 
+            ))
+
+            # B. 处理【代付记录】(作为主表去匹配)
+            df_payment['业务订单号'] = df_payment['业务订单号'].astype(str).str.strip().str.replace('.0', '', regex=False)
+            # 同样生成组内序号
+            df_payment['组内序号'] = df_payment.groupby('业务订单号').cumcount() + 1
+            
+            # C. 执行双键匹配
+            def get_repayment_type(row):
+                oid = row['业务订单号']
+                seq = row['组内序号']
+                return detail_lookup.get((oid, seq), '未知')
+
+            # 将匹配到的结果写入新列
+            df_payment['还款期次'] = df_payment.apply(get_repayment_type, axis=1)
             # ================= 核心修正逻辑开始 =================
             
             # A. 预处理：构建“订单支付明细”的查找字典
