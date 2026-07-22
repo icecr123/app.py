@@ -88,6 +88,22 @@ def main():
             df_order_main = pd.read_excel(file_order_main)
             df_order_detail = pd.read_excel(file_order_detail)
             df_policy = pd.read_excel(file_policy)
+            # ================= 【关键修复】自动对齐列名 =================
+            # 这一步是为了防止 Excel 表头名字不一样导致 KeyError
+            
+            # 1. 检查并修复【订单主表】(解决你现在的报错)
+            # 如果表里有 '业务订单号'，就把它改名为 '订单编号'
+            if '业务订单号' in df_order_main.columns:
+                df_order_main.rename(columns={'业务订单号': '订单编号'}, inplace=True)
+            
+            # 2. 检查并修复【订单支付明细】
+            if '业务订单号' in df_order_detail.columns:
+                df_order_detail.rename(columns={'业务订单号': '订单编号'}, inplace=True)
+            
+            # 3. 检查并修复【代付记录】
+            if '订单编号' in df_payment.columns:
+                df_payment.rename(columns={'订单编号': '业务订单号'}, inplace=True)
+            # ==========================================================
             # ================= 【新增】万能列名修复补丁 =================
             # 这一步是为了防止 Excel 表头名字不一样导致 KeyError
             
