@@ -9,7 +9,7 @@ st.set_page_config(page_title="返佣计算小工具", layout="centered")
 st.title("🧮 月度回款返佣自动计算工具")
 st.markdown("请依次上传以下 5 个文件，工具将自动完成计算并生成结果。")
 
-# --- 核心逻辑函数 (已彻底清洗) ---
+# --- 核心逻辑函数 ---
 def safe_float(val):
     """安全转换浮点数"""
     if pd.isna(val): return 0.0
@@ -104,10 +104,8 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '分期金额': row.get('分期金额', 0)
             }
 
-    # B. 【关键修改】为订单支付明细生成还款序号，并创建双键映射
-    # 按订单编号分组，为每笔还款记录打上序号 (1, 2, 3...)
+    # B. 为订单支付明细生成还款序号，并创建双键映射
     df_detail['还款序号'] = df_detail.groupby('订单编号').cumcount() + 1
-    # 创建一个以 (订单编号, 还款序号) 为索引的 Series，方便快速查找还款类型
     detail_type_map = df_detail.set_index(['订单编号', '还款序号'])['还款类型']
 
     # C. 返佣政策映射
@@ -153,7 +151,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 
     # 4. 处理代付记录 (线下 - 聚合版)
     if not df_payment_raw.empty:
-        # 【关键修改】为代付记录也生成还款序号
+        # 为代付记录也生成还款序号
         df_payment_raw['还款序号'] = df_payment_raw.groupby('业务订单号').cumcount() + 1
         
         # 按批次和订单号分组进行聚合
@@ -181,7 +179,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             final_pay_time = service_time if service_time else group.iloc[0].get('完成时间', '')
             remark_parts = ["延期服务费"] if has_delay_note else []
             
-            # 【关键修改】使用 (业务订单号, 还款序号) 双键匹配还款类型
+            # 使用 (业务订单号, 还款序号) 双键匹配还款类型
             period_type = detail_type_map.get((oid_clean, seq_num), '')
 
             new_row = {
@@ -190,7 +188,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '收款商户': info.get('收款商户', ''),
                 '付款人': info.get('付款人', ''),
                 '分期金额': info.get('分期金额', 0),
-                '还款期次': period_type, # 使用精准匹配到的期次
+                '还款期次': period_type,
                 '支付时间': final_pay_time,
                 '服务费': total_service,
                 '逾期费用': total_overdue,
