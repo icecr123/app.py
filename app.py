@@ -20,14 +20,10 @@ def safe_float(val):
 
 def clean_order_id(oid):
     """
-    【核心修复】暴力清洗订单号：
-    1. 转字符串
-    2. 去除括号、空格、E+等科学计数法符号
-    3. 提取其中的纯数字
+    暴力清洗订单号：提取纯数字，防止科学计数法和括号干扰
     """
     if pd.isna(oid): return ""
     s = str(oid).strip()
-    # 使用正则提取所有数字
     nums = re.findall(r'\d+', s)
     return "".join(nums) if nums else s
 
@@ -84,7 +80,7 @@ def calculate_commission(row, policy_map):
 
 # ================= 主处理流程 =================
 def process_data(ledger_file, payment_file, order_file, detail_file, policy_file):
-    # 1. 读取文件 (强制指定订单相关列为字符串，防止 Excel 自动转为科学计数法)
+    # 1. 读取文件 (强制指定订单相关列为字符串)
     df_ledger = pd.read_excel(ledger_file, dtype={'业务订单号': str, '订单编号': str})
     df_payment_raw = pd.read_excel(payment_file, dtype={'业务订单号': str, '订单编号': str})
     df_order = pd.read_excel(order_file, dtype={'订单号': str, '订单编号': str})
@@ -98,7 +94,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         if '订单编号' in df.columns:
             df['订单编号'] = df['订单编号'].apply(clean_order_id)
 
-    # 3. 建立映射字典 (Key 全部是清洗后的纯数字字符串)
+    # 3. 建立映射字典
     order_map = {}
     for _, row in df_order.iterrows():
         oid = row.get('订单编号', '')
@@ -113,7 +109,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '分期金额': row.get('分期金额', 0)
             }
 
-    # 构建明细表映射 (用于匹配还款类型)
     detail_map = {}
     if '订单编号' in df_detail.columns:
         df_detail['还款期次_idx'] = df_detail.groupby('订单编号').cumcount() + 1
@@ -121,7 +116,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             k = f"{r['订单编号']}_{r['还款期次_idx']}"
             detail_map[k] = r.get('还款类型', '')
 
-    # 构建政策映射
     policy_map = {}
     for _, row in df_policy_raw.iterrows():
         inst = str(row.get('机构名称', '')).strip()
@@ -157,59 +151,60 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         }
         res_list.append(new_row)
 
-    # 5. 处理线下代付 (Payment)
+    # 5. 处理线下代付 (Payment) - 【核心重构逻辑】
     if not df_payment_raw.empty:
-        # A. 预处理：给每一行打上标签
-        def classify(row):
-            note = str(row.get('系统备注', '')).strip()
-            amt = safe_float(row.get('清分金额', 0))
-            if amt <= 0: return 'ignore'
-            if '返服务费' in note: return 'ignore' 
-            if '服务费' in note or '手续费' in note: return 'fee'
-            if '罚息' in note or '逾期' in note or '违约金' in note: return 'penalty'
-            return 'principal'
-
-        df_payment_raw['_type'] = df_payment_raw.apply(classify, axis=1)
-
-        # B. 分组聚合 (按订单号)
-        grouped = df_payment_raw.groupby(['订单编号'])
+        # 确保关键列存在
+        if '支付批次号' not in df_payment_raw.columns:
+            st.error("❌ 代付记录表中缺少【支付批次号】列，无法按批次拆分！")
+            st.stop()
+            
+        # 按 【支付批次号 + 订单编号】 进行分组，确保每一笔独立代付都不被合并
+        grouped = df_payment_raw.groupby(['支付批次号', '订单编号'])
         
-        for (oid,), group in grouped:
+        for (batch_id, oid), group in grouped:
             info = order_map.get(oid, {}) 
             
-            total_service = 0.0
-            total_overdue = 0.0
-            final_pay_time = None
+            service_fee = 0.0
+            overdue_fee = 0.0
+            pay_time = ''
             
-            # C. 遍历组内每一行
+            # 遍历该批次下的所有明细行
             for _, r in group.iterrows():
-                r_type = r['_type']
+                note = str(r.get('系统备注', '')).strip()
                 amt = safe_float(r.get('清分金额', 0))
-                t = r.get('完成时间', '')
+                finish_time = r.get('完成时间', '')
                 
-                if r_type == 'fee': total_service += amt
-                elif r_type == 'penalty': total_overdue += amt
+                # 【精准匹配服务费】：严格等于“服务费”（排除“返服务费”等）
+                if note == '服务费':
+                    service_fee += amt
+                    # 服务费的完成时间即为支付时间
+                    if pd.notna(finish_time) and str(finish_time).strip() != '':
+                        pay_time = finish_time
                 
-                # 抓取时间：只要不是空，且当前还没找到时间，就记录下来
-                if pd.notna(t) and str(t).strip() != '' and (final_pay_time is None or str(final_pay_time).strip() == ''):
-                    final_pay_time = t
+                # 【精准匹配罚息】：包含罚息、逾期、违约金
+                elif '罚息' in note or '逾期' in note or '违约金' in note:
+                    overdue_fee += amt
+                    # 如果服务费没抓到时间，用罚息的时间兜底
+                    if not pay_time and pd.notna(finish_time) and str(finish_time).strip() != '':
+                        pay_time = finish_time
 
-            # D. 组装数据 (不再过滤金额为0的行，防止误删)
+            # 【绝不丢弃数据】：无论金额是否为0，只要代付表里有这个批次，就保留这一行
             new_row = {
                 '业务订单号': oid, 
                 '产品名称': info.get('产品名称', ''),
                 '收款商户': info.get('收款商户', ''),
                 '付款人': info.get('付款人', ''),
                 '分期金额': info.get('分期金额', 0),
-                '支付时间': final_pay_time if final_pay_time else '', 
-                '服务费': total_service,
-                '逾期费用': total_overdue,
+                '支付时间': pay_time, 
+                '服务费': service_fee,
+                '逾期费用': overdue_fee,
                 '还款方式': '线下代付',
                 '下单时间': info.get('下单时间', ''),
                 '订单状态': info.get('订单状态', ''),
                 '维护商务': info.get('维护商务', ''),
                 '备注': '',
-                '_temp_oid': oid # 内部变量，用于后续排序和期次匹配
+                '_temp_oid': oid,
+                '_temp_batch': batch_id
             }
             res_list.append(new_row)
 
@@ -219,7 +214,8 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     # 单独处理线下数据的期次匹配
     df_offline = df_all[df_all['还款方式'] == '线下代付'].copy()
     if not df_offline.empty:
-        df_offline = df_offline.sort_values(by=['_temp_oid', '支付时间'])
+        # 按照订单号和批次号排序，确保期次计算顺序与代付时间一致
+        df_offline = df_offline.sort_values(by=['_temp_oid', '_temp_batch'])
         df_offline['seq'] = df_offline.groupby('_temp_oid').cumcount() + 1
         
         types_list = []
@@ -228,8 +224,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             types_list.append(detail_map.get(k, '未匹配'))
             
         df_offline['还款期次'] = types_list
-        
-        # 更新主表
         df_all.loc[df_all['还款方式'] == '线下代付', '还款期次'] = df_offline['还款期次'].values
 
     # 7. 计算返佣
@@ -271,14 +265,11 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         '维护商务', '是否有返佣', '返佣比例', '返佣金额', '备注'
     ]
     
-    # 确保这 17 列都存在，不存在就填空
     for col in final_columns:
         if col not in df_all.columns:
             df_all[col] = ""
             
-    # 只保留这 17 列，丢弃 _temp_oid 等中间列
     df_result = df_all[final_columns].copy()
-    
     return df_result
 
 # ================= 网页界面部分 =================
@@ -299,7 +290,6 @@ if st.button("开始计算", type="primary"):
                 st.success(f"✅ 计算完成！共处理 {len(result_df)} 条记录。")
                 st.dataframe(result_df)
                 
-                # 生成 Excel 下载 (优先使用 openpyxl 引擎，防止缺少 xlsxwriter 报错)
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     result_df.to_excel(writer, index=False, sheet_name='返佣计算结果')
@@ -307,7 +297,7 @@ if st.button("开始计算", type="primary"):
                 st.download_button(
                     label="📥 下载最终结果表格 (17列标准版)",
                     data=output.getvalue(),
-                    file_name="返佣计算结果_标准版.xlsx",
+                    file_name="月度回款返佣计算结果_标准版.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             except Exception as e:
