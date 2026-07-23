@@ -92,11 +92,11 @@ def calculate_commission(row, policy_map):
 # --- 主处理流程 ---
 def process_data(ledger_file, payment_file, order_file, detail_file, policy_file):
     # 1. 读取所有文件
-    df_ledger = pd.read_excel(ledger_file, dtype=str)
-    df_payment_raw = pd.read_excel(payment_file, dtype=str)
-    df_order = pd.read_excel(order_file, dtype=str)
-    df_detail = pd.read_excel(detail_file, dtype=str)
-    df_policy_raw = pd.read_excel(policy_file, dtype=str)
+    df_ledger = pd.read_excel(ledger_file)
+    df_payment_raw = pd.read_excel(payment_file)
+    df_order = pd.read_excel(order_file)
+    df_detail = pd.read_excel(detail_file)
+    df_policy_raw = pd.read_excel(policy_file)
 
     # 2. 预处理：统一列名，解决 KeyError 并为双键匹配做准备
     rename_map = {'订单号': '订单编号', '业务订单号': '订单编号'}
@@ -178,36 +178,45 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         }
         res_list.append(new_row)
 
-    # 5. 处理代付记录 (线下 - 核心修复：聚合清洗与双键匹配)
+    # 5. 处理代付记录 (线下 - 核心修复：前置过滤 + 聚合清洗 + 双键匹配)
     if not df_payment_raw.empty and '订单编号' in df_payment_raw.columns:
-        # 5.1 标记每一行的费用类型
+        # 5.1 【前置过滤】只要备注里包含“本金”或“返服务费”，整行直接丢弃
+        def is_valid_row(row):
+            note = str(row.get('系统备注', ''))
+            if '本金' in note or '返服务费' in note:
+                return False
+            return True
+            
+        df_payment_raw = df_payment_raw[df_payment_raw.apply(is_valid_row, axis=1)].copy()
+
+        # 5.2 标记剩余行的费用类型
         def classify_type(row):
             note = str(row.get('系统备注', ''))
             amt = safe_float(row.get('清分金额', 0))
             if amt <= 0: return 'ignore'
             if '服务费' in note or '手续费' in note: return 'fee'
             elif '罚息' in note or '逾期' in note or '违约金' in note: return 'penalty'
-            else: return 'principal'
+            else: return 'ignore' # 其他未识别的也忽略，防止本金混入
 
         df_payment_raw['_type'] = df_payment_raw.apply(classify_type, axis=1)
 
-        # 5.2 按 支付批次号+订单编号 分组聚合
+        # 5.3 按 支付批次号+订单编号 分组聚合
         grouped = df_payment_raw.groupby(['支付批次号', '订单编号']).agg(
             支付时间=('完成时间', 'first'),
             服务费=('清分金额', lambda x: x[df_payment_raw.loc[x.index, '_type'] == 'fee'].sum()),
             罚息=('清分金额', lambda x: x[df_payment_raw.loc[x.index, '_type'] == 'penalty'].sum())
         ).reset_index()
 
-        # 5.3 过滤掉纯本金行 (服务费和罚息都为0的不要)
+        # 5.4 过滤掉纯本金行 (服务费和罚息都为0的不要)
         df_payment_clean = grouped[(grouped['服务费'] > 0) | (grouped['罚息'] > 0)].copy()
         df_payment_clean['服务费'] = df_payment_clean['服务费'].round(2)
         df_payment_clean['罚息'] = df_payment_clean['罚息'].round(2)
 
-        # 5.4 生成还款序号 (双键匹配准备)
+        # 5.5 生成还款序号 (双键匹配准备)
         df_payment_clean = df_payment_clean.sort_values(by=['订单编号', '支付时间'])
         df_payment_clean['还款期次'] = df_payment_clean.groupby('订单编号').cumcount() + 1
 
-        # 5.5 遍历清洗后的数据，组装结果
+        # 5.6 遍历清洗后的数据，组装结果
         for _, row in df_payment_clean.iterrows():
             oid_clean = clean_order_id(row.get('订单编号'))
             info = order_map.get(oid_clean, {})
