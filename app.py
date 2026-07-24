@@ -6,17 +6,14 @@ from io import BytesIO
 import datetime
 
 # ================= 页面配置 =================
-st.set_page_config(page_title="月度回款返佣计算工具 V17-完美修复版", layout="wide")
-st.title("🧮 月度回款返佣自动计算工具 (V17-完美修复版)")
+st.set_page_config(page_title="月度回款返佣计算工具 V18-终极完整版", layout="wide")
+st.title("🧮 月度回款返佣自动计算工具 (V18-终极完整版)")
 st.markdown("""
-**V17 核心修复说明：**
-1. **彻底修复报错**：解决线下代付处理时的 `The truth value of a Series is ambiguous` 错误。
-2. **列名严格还原**：
-   - 订单主表识别 `订单号`。
-   - 支付明细表识别 `订单编号`。
-   - 最终导出统一为 `业务订单号`。
-3. **代付过滤逻辑**：代付记录中，若备注包含“本金”或“返服务费”，直接剔除，不参与计算。
-4. **完整代码**：包含所有辅助函数及主程序入口，无截断。
+**V18 终极修复说明：**
+1. **精准适配多表列名**：订单主表识别`订单号`，支付明细表识别`订单编号`，最终输出统一为`业务订单号`。
+2. **代付过滤逻辑**：代付记录中，若备注包含“本金”或“返服务费”，直接剔除，不参与计算。
+3. **修复报错**：彻底解决线下代付处理时的 `The truth value of a Series is ambiguous` 错误。
+4. **代码绝对完整**：包含所有辅助函数及主程序入口，无截断，可直接运行。
 """)
 
 # ================= 辅助函数 =================
@@ -37,7 +34,6 @@ def clean_remark(remark):
     """清洗备注：仅保留延期服务费相关，其余原样返回"""
     if pd.isna(remark): return ""
     s = str(remark).strip()
-    # 仅处理延期手续费/服务费的格式统一
     if "延期手续费" in s or "延期服务费" in s:
         period_match = re.search(r'\d+期', s)
         period_str = period_match.group(0) if period_match else ""
@@ -59,10 +55,7 @@ def count_periods(period_str):
     return max(len(numbers), 1)
 
 def calculate_commission(row, policy_map):
-    """
-    计算返佣逻辑
-    返回: [是否有返佣, 返佣比例, 返佣金额, 不返佣原因]
-    """
+    """计算返佣逻辑"""
     merchant = str(row.get('收款商户', '')).strip()
     product = str(row.get('产品名称', '')).strip()
     period_str = str(row.get('还款期次', '')).strip()
@@ -74,11 +67,9 @@ def calculate_commission(row, policy_map):
     
     no_comm_reason = "" 
     
-    # 如果没有匹配到政策，不返佣
     if not policy: 
         return pd.Series(['否', '0.0000', 0.0, no_comm_reason])
     
-    # 校验下单时间是否早于政策返佣开始时间
     policy_start_time = policy.get('开始时间', None)
     if policy_start_time and pd.notna(order_time):
         try:
@@ -128,7 +119,7 @@ def main():
             st.error("请上传所有 5 个文件！")
         else:
             try:
-                # 1. 读取文件 (保持原始列名，不做全局重命名，防止混乱)
+                # 1. 读取文件 (保持原始列名)
                 df_ledger = pd.read_excel(file_ledger, dtype=str)
                 df_payment = pd.read_excel(file_payment, dtype=str)
                 df_order = pd.read_excel(file_order, dtype=str)
@@ -139,18 +130,11 @@ def main():
 
                 # 2. 构建基础映射字典
                 
-                # --- 订单主表映射 ---
-                # 寻找可能的订单ID列名
-                order_id_col = None
-                for c in ['业务订单号', '订单号', '订单编号', '合同号']:
-                    if c in df_order.columns:
-                        order_id_col = c
-                        break
-                
+                # --- 订单主表映射 (识别: 订单号) ---
                 order_map = {}
-                if order_id_col:
+                if '订单号' in df_order.columns:
                     for _, row in df_order.iterrows():
-                        oid = str(row.get(order_id_col, '')).strip()
+                        oid = str(row.get('订单号', '')).strip()
                         if oid:
                             order_map[oid] = {
                                 '产品名称': str(row.get('产品名称', '')).strip(),
@@ -175,23 +159,16 @@ def main():
                             '开始时间': row.get('开始时间', None)
                         }
 
-                # --- 历史已还期数映射 (来自支付明细) ---
+                # --- 历史已还期数映射 (来自支付明细, 识别: 订单编号) ---
                 history_map = {}
-                detail_id_col = None
-                for c in ['订单编号', '业务订单号', '订单号']:
-                    if c in df_detail.columns:
-                        detail_id_col = c
-                        break
-                
-                if detail_id_col:
-                    df_detail['_clean_oid'] = df_detail[detail_id_col].astype(str).str.strip()
+                if '订单编号' in df_detail.columns:
+                    df_detail['_clean_oid'] = df_detail['订单编号'].astype(str).str.strip()
                     history_map = df_detail.groupby('_clean_oid').size().to_dict()
 
                 results = []
 
                 # ================= 模块一：线上分账处理 =================
                 st.info("正在处理线上分账数据...")
-                # 寻找线上表的订单ID列
                 ledger_id_col = None
                 for c in ['业务订单号', '订单号', '订单编号']:
                     if c in df_ledger.columns:
@@ -224,28 +201,23 @@ def main():
                 # ================= 模块二：线下代付处理 =================
                 st.info("正在处理线下代付数据...")
                 
-                # 寻找代付表的订单ID列
                 payment_id_col = None
-                for c in ['订单编号', '业务订单号', '订单号']:
+                for c in ['业务订单号', '订单号', '订单编号']:
                     if c in df_payment.columns:
                         payment_id_col = c
                         break
 
                 if payment_id_col:
-                    # 预处理：清洗ID，计算金额
                     df_payment['_clean_oid'] = df_payment[payment_id_col].astype(str).str.strip()
                     df_payment = df_payment[df_payment['_clean_oid'] != '']
-                    
-                    # 【关键修复】确保服务费是数值型，避免后续报错
                     df_payment['_amount'] = df_payment['服务费'].apply(safe_float)
                     
-                    # 确保有备注列用于过滤
                     if '备注' not in df_payment.columns:
                         df_payment['备注'] = ''
                     else:
                         df_payment['备注'] = df_payment['备注'].fillna('')
 
-                    # 【新增过滤逻辑】剔除备注包含“本金”或“返服务费”的行
+                    # 【过滤逻辑】剔除备注包含“本金”或“返服务费”的行
                     mask_exclude = df_payment['备注'].astype(str).str.contains('本金|返服务费', na=False)
                     df_payment_filtered = df_payment[~mask_exclude]
                     
@@ -257,14 +229,12 @@ def main():
                         base_paid = history_map.get(oid, 0)
                         curr_runtime = runtime_counters.get(oid, 0)
                         
-                        # 筛选服务费行和罚息行
                         service_rows = group[group['备注'].astype(str).str.contains('服务费', na=False)]
                         penalty_rows = group[group['备注'].astype(str).str.contains('罚息|逾期|违约金', na=False, regex=True)]
                         
                         total_penalty = penalty_rows['_amount'].sum()
                         penalty_added = False
                         
-                        # 遍历服务费行生成记录
                         for _, s_row in service_rows.iterrows():
                             note = clean_remark(s_row['备注'])
                             is_deferred = '延期服务费' in note
@@ -295,7 +265,6 @@ def main():
                                 '备注': note
                             })
                             
-                        # 处理只有罚息没有服务费的情况
                         if service_rows.empty and total_penalty > 0:
                             actual_period = base_paid + curr_runtime + 1
                             results.append({
@@ -323,13 +292,11 @@ def main():
                 df_result = pd.DataFrame(results)
                 
                 if not df_result.empty:
-                    # 计算返佣
                     comm_results = df_result.apply(lambda row: calculate_commission(row, policy_map), axis=1)
                     df_result['是否有返佣'] = comm_results[0]
                     df_result['返佣比例'] = comm_results[1]
                     df_result['返佣金额'] = comm_results[2]
                     
-                    # 将不返佣原因追加到备注中
                     df_result['备注'] = df_result['备注'].astype(str) + comm_results[3].apply(
                         lambda x: f"；{x}" if x else ""
                     )
@@ -342,7 +309,6 @@ def main():
                         '返佣金额', '备注'
                     ]
                     
-                    # 补齐缺失列
                     for col in target_columns:
                         if col not in df_result.columns:
                             df_result[col] = ""
@@ -361,4 +327,15 @@ def main():
                         label="📥 下载处理后的 Excel 文件",
                         data=output,
                         file_name=f"月度回款返佣计算结果_{datetime.date.today()}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+            except Exception as e:
+                st.error(f"❌ 处理出错: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+    else:
+        st.warning("⚠️ 请在左侧上传全部 5 个 Excel 文件以开始处理...")
+
+if __name__ == "__main__":
+    main()
