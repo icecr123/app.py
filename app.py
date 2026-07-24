@@ -6,22 +6,21 @@ from io import BytesIO
 import datetime
 
 # ================= 页面配置 =================
-st.set_page_config(page_title="月度回款返佣计算工具 V20-终极精准版", layout="wide")
-st.title("🧮 月度回款返佣自动计算工具 (V20-终极精准版)")
+st.set_page_config(page_title="月度回款返佣计算工具 V22-精准期次与罚息合并版", layout="wide")
+st.title("🧮 月度回款返佣自动计算工具 (V22-精准期次与罚息合并版)")
 st.markdown("""
-**V20 核心修复说明：**
-1. **代付金额列锁定**：严格使用 `清分金额` 列提取代付金额。
-2. **代付备注过滤逻辑重写**：
-   - 仅抓取备注中包含“服务费”、“延期服务费”或“罚息/逾期/违约金”的数据。
-   - 若备注包含“本金”或“返服务费”，直接剔除，不参与计算。
-3. **多表列名精准适配**：订单主表识别`订单号`，支付明细表识别`订单编号`，最终输出统一为`业务订单号`。
-4. **代码绝对完整**：包含所有辅助函数及主程序入口，无截断。
+**V22 核心修复说明：**
+1. **代付金额列精准锁定**：严格使用 `清分金额` 列提取代付金额。
+2. **代付备注过滤逻辑重写**：仅抓取“服务费/罚息/逾期/违约金”，剔除“本金/返服务费”。
+3. **罚息合并逻辑**：同一订单+同批次下，若同时有服务费和罚息，罚息金额合并至服务费行；若仅有罚息，则单独成行。
+4. **期次精准递增（核心修复）**：不再全局+1，而是按订单在【订单支付明细】中的历史还款时间排序，依次消费期次，完美解决期次错乱问题。
+5. **多表列名适配**：订单主表识别`订单号`，支付明细识别`订单编号`，最终输出统一为`业务订单号`。
 """)
 
 # ================= 辅助函数 =================
 
 def safe_float(val):
-    """安全转换金额，防止 Series 类型错误"""
+    """安全地将任意值转换为浮点数"""
     if isinstance(val, pd.Series):
         val = val.iloc[0] if not val.empty else 0
     if pd.isna(val): return 0.0
@@ -33,7 +32,7 @@ def safe_float(val):
         return 0.0
 
 def clean_remark(remark):
-    """清洗备注：仅保留延期服务费相关，其余原样返回"""
+    """清洗备注字段，仅保留延期服务费相关描述"""
     if pd.isna(remark): return ""
     s = str(remark).strip()
     if "延期手续费" in s or "延期服务费" in s:
@@ -51,13 +50,13 @@ def parse_xy_product(product_name):
     return False, 0, 0
 
 def count_periods(period_str):
-    """统计期数"""
+    """统计还款期次字符串中的数字个数"""
     if pd.isna(period_str): return 1
     numbers = re.findall(r'\d+', str(period_str))
     return max(len(numbers), 1)
 
 def calculate_commission(row, policy_map):
-    """计算返佣逻辑"""
+    """根据订单信息和返佣政策，计算该笔还款的返佣情况"""
     merchant = str(row.get('收款商户', '')).strip()
     product = str(row.get('产品名称', '')).strip()
     period_str = str(row.get('还款期次', '')).strip()
@@ -66,7 +65,6 @@ def calculate_commission(row, policy_map):
     
     key = f"{merchant}_{product}"
     policy = policy_map.get(key, {})
-    
     no_comm_reason = "" 
     
     if not policy: 
@@ -161,11 +159,31 @@ def main():
                             '开始时间': row.get('开始时间', None)
                         }
 
-                # --- 历史已还期数映射 (来自支付明细, 识别: 订单编号) ---
-                history_map = {}
+                # --- 【核心修复】历史还款期次队列映射 (来自支付明细, 识别: 订单编号) ---
+                # 按订单号分组，按支付时间正序排列，将还款类型存入列表，用于后续按顺序消费
+                history_queue_map = {}
                 if '订单编号' in df_detail.columns:
-                    df_detail['_clean_oid'] = df_detail['订单编号'].astype(str).str.strip()
-                    history_map = df_detail.groupby('_clean_oid').size().to_dict()
+                    df_detail_sorted = df_detail.copy()
+                    df_detail_sorted['_clean_oid'] = df_detail_sorted['订单编号'].astype(str).str.strip()
+                    # 假设支付明细表中有支付时间或类似时间列，这里用通用名，如果没有则按原顺序
+                    time_col = None
+                    for c in ['支付时间', '还款时间', '交易时间']:
+                        if c in df_detail_sorted.columns:
+                            time_col = c
+                            break
+                    if time_col:
+                        df_detail_sorted = df_detail_sorted.sort_values(['_clean_oid', time_col])
+                    
+                    # 提取还款类型（假设列名为 还款类型 或 期次）
+                    period_col = None
+                    for c in ['还款类型', '期次', '还款期次']:
+                        if c in df_detail_sorted.columns:
+                            period_col = c
+                            break
+                            
+                    if period_col:
+                        for oid, group in df_detail_sorted.groupby('_clean_oid'):
+                            history_queue_map[oid] = list(group[period_col].astype(str).values)
 
                 results = []
 
@@ -213,88 +231,101 @@ def main():
                     df_payment['_clean_oid'] = df_payment[payment_id_col].astype(str).str.strip()
                     df_payment = df_payment[df_payment['_clean_oid'] != '']
                     
-                    # 【核心修复】严格使用“清分金额”列
+                    # 严格使用“清分金额”列
                     if '清分金额' in df_payment.columns:
                         df_payment['_amount'] = df_payment['清分金额'].apply(safe_float)
                     else:
                         st.warning("⚠️ 代付记录中未找到‘清分金额’列，代付金额将默认记为0。")
                         df_payment['_amount'] = 0.0
                     
-                    # 确保有备注列
                     if '备注' not in df_payment.columns:
                         df_payment['备注'] = ''
                     else:
                         df_payment['备注'] = df_payment['备注'].fillna('')
 
-                    # 【核心过滤逻辑】
-                    # 1. 必须包含：服务费、延期服务费、罚息、逾期、违约金
+                    # 过滤逻辑：包含服务费/罚息，且排除本金/返服务费
                     include_mask = df_payment['备注'].astype(str).str.contains('服务费|罚息|逾期|违约金', na=False)
-                    # 2. 必须排除：本金、返服务费
                     exclude_mask = df_payment['备注'].astype(str).str.contains('本金|返服务费', na=False)
-                    
-                    # 取交集：在包含列表中，且不在排除列表中
                     valid_mask = include_mask & (~exclude_mask)
                     df_payment_filtered = df_payment[valid_mask]
                     
                     filtered_out_count = len(df_payment) - len(df_payment_filtered)
                     if filtered_out_count > 0:
-                        st.info(f"💡 代付记录中已自动过滤掉 {filtered_out_count} 条不符合要求（含本金/返服务费，或无有效服务费/罚息）的数据。")
+                        st.info(f"💡 代付记录中已自动过滤掉 {filtered_out_count} 条不符合要求的数据。")
 
-                    grouped = df_payment_filtered.groupby(['_clean_oid', '支付批次号'])
-                    runtime_counters = {} 
+                    # 【核心修复】按 订单号 + 支付批次号 分组
+                    batch_id_col = '支付批次号' if '支付批次号' in df_payment_filtered.columns else None
+                    group_cols = ['_clean_oid']
+                    if batch_id_col: group_cols.append(batch_id_col)
+                    
+                    grouped = df_payment_filtered.groupby(group_cols)
+                    
+                    # 记录当前每个订单已经消费了多少次历史期次
+                    runtime_period_idx = {oid: 0 for oid in history_queue_map.keys()}
 
-                    for (oid, batch_id), group in grouped:
+                    for name, group in grouped:
+                        oid = name[0]
                         info = order_map.get(oid, {})
-                        base_paid = history_map.get(oid, 0)
-                        curr_runtime = runtime_counters.get(oid, 0)
                         
-                        # 因为已经提前过滤，这里只需区分是服务费还是罚息
+                        # 区分当前批次下的服务费和罚息
                         service_rows = group[group['备注'].astype(str).str.contains('服务费', na=False)]
                         penalty_rows = group[group['备注'].astype(str).str.contains('罚息|逾期|违约金', na=False, regex=True)]
                         
                         total_penalty = penalty_rows['_amount'].sum()
-                        penalty_added = False
                         
-                        for _, s_row in service_rows.iterrows():
-                            note = clean_remark(s_row['备注'])
-                            is_deferred = '延期服务费' in note
-                            
-                            period = ""
-                            if not is_deferred:
-                                actual_period = base_paid + curr_runtime + 1
-                                period = f"第{actual_period}期"
-                                curr_runtime += 1
-                            
-                            p_to_add = total_penalty if not penalty_added else 0.0
-                            if not penalty_added and total_penalty > 0: penalty_added = True
-                            
+                        # 获取当前订单应该匹配的还款期次
+                        current_period = ""
+                        if oid in history_queue_map:
+                            idx = runtime_period_idx.get(oid, 0)
+                            queue = history_queue_map[oid]
+                            if idx < len(queue):
+                                current_period = queue[idx]
+                                # 只有当本批次有服务费时，才认为消费了一个新的期次
+                                if not service_rows.empty:
+                                    runtime_period_idx[oid] = idx + 1
+                            else:
+                                # 超出历史记录，按递增生成
+                                base = len(queue)
+                                actual_p = base + runtime_period_idx.get(oid, 0) + 1
+                                current_period = f"第{actual_p}期"
+                                if not service_rows.empty:
+                                    runtime_period_idx[oid] = runtime_period_idx.get(oid, 0) + 1
+                        else:
+                            # 没有历史记录的订单，从第1期开始递增
+                            actual_p = runtime_period_idx.get(oid, 0) + 1
+                            current_period = f"第{actual_p}期"
+                            if not service_rows.empty:
+                                runtime_period_idx[oid] = actual_p
+
+                        # 场景1：本批次有服务费（可能伴随罚息）
+                        if not service_rows.empty:
+                            for _, s_row in service_rows.iterrows():
+                                note = clean_remark(s_row['备注'])
+                                results.append({
+                                    '业务订单号': oid, 
+                                    '产品名称': info.get('产品名称', ''),
+                                    '收款商户': info.get('收款商户', ''), 
+                                    '付款人': info.get('付款人', ''),
+                                    '分期金额': info.get('分期金额', 0), 
+                                    '还款期次': current_period,
+                                    '支付时间': s_row.get('支付时间', ''), 
+                                    '服务费': safe_float(s_row['_amount']),
+                                    '逾期费用': total_penalty,  # 罚息合并到服务费行
+                                    '还款方式': '线下代付',
+                                    '下单时间': info.get('下单时间', ''), 
+                                    '订单状态': info.get('订单状态', ''),
+                                    '维护商务': info.get('维护商务', ''),
+                                    '备注': note
+                                })
+                        # 场景2：本批次只有罚息，没有服务费
+                        elif total_penalty > 0:
                             results.append({
                                 '业务订单号': oid, 
                                 '产品名称': info.get('产品名称', ''),
                                 '收款商户': info.get('收款商户', ''), 
                                 '付款人': info.get('付款人', ''),
                                 '分期金额': info.get('分期金额', 0), 
-                                '还款期次': period,
-                                '支付时间': s_row.get('支付时间', ''), 
-                                '服务费': safe_float(s_row['_amount']),
-                                '逾期费用': p_to_add, 
-                                '还款方式': '线下代付',
-                                '下单时间': info.get('下单时间', ''), 
-                                '订单状态': info.get('订单状态', ''),
-                                '维护商务': info.get('维护商务', ''),
-                                '备注': note
-                            })
-                            
-                        # 处理只有罚息没有服务费的情况
-                        if service_rows.empty and total_penalty > 0:
-                            actual_period = base_paid + curr_runtime + 1
-                            results.append({
-                                '业务订单号': oid, 
-                                '产品名称': info.get('产品名称', ''),
-                                '收款商户': info.get('收款商户', ''), 
-                                '付款人': info.get('付款人', ''),
-                                '分期金额': info.get('分期金额', 0), 
-                                '还款期次': f"第{actual_period}期",
+                                '还款期次': current_period,
                                 '支付时间': penalty_rows.iloc[0].get('支付时间', ''), 
                                 '服务费': 0.0,
                                 '逾期费用': total_penalty, 
@@ -304,9 +335,6 @@ def main():
                                 '维护商务': info.get('维护商务', ''),
                                 '备注': '补缴罚息/逾期'
                             })
-                            curr_runtime += 1
-                            
-                    runtime_counters.update({k: v for k, v in runtime_counters.items()})
 
                 # ================= 模块三：汇总与返佣计算 =================
                 st.info("正在计算返佣并生成结果...")
@@ -322,7 +350,7 @@ def main():
                         lambda x: f"；{x}" if x else ""
                     )
                     
-                    # 【严格固定17列表头】
+                    # 严格固定17列表头
                     target_columns = [
                         '业务订单号', '产品名称', '收款商户', '付款人', '分期金额', 
                         '还款期次', '支付时间', '服务费', '逾期费用', '还款方式', 
