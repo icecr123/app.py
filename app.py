@@ -6,14 +6,16 @@ from io import BytesIO
 import datetime
 
 # ================= 页面配置 =================
-st.set_page_config(page_title="月度回款返佣计算工具 V18-终极完整版", layout="wide")
-st.title("🧮 月度回款返佣自动计算工具 (V18-终极完整版)")
+st.set_page_config(page_title="月度回款返佣计算工具 V20-终极精准版", layout="wide")
+st.title("🧮 月度回款返佣自动计算工具 (V20-终极精准版)")
 st.markdown("""
-**V18 终极修复说明：**
-1. **精准适配多表列名**：订单主表识别`订单号`，支付明细表识别`订单编号`，最终输出统一为`业务订单号`。
-2. **代付过滤逻辑**：代付记录中，若备注包含“本金”或“返服务费”，直接剔除，不参与计算。
-3. **修复报错**：彻底解决线下代付处理时的 `The truth value of a Series is ambiguous` 错误。
-4. **代码绝对完整**：包含所有辅助函数及主程序入口，无截断，可直接运行。
+**V20 核心修复说明：**
+1. **代付金额列锁定**：严格使用 `清分金额` 列提取代付金额。
+2. **代付备注过滤逻辑重写**：
+   - 仅抓取备注中包含“服务费”、“延期服务费”或“罚息/逾期/违约金”的数据。
+   - 若备注包含“本金”或“返服务费”，直接剔除，不参与计算。
+3. **多表列名精准适配**：订单主表识别`订单号`，支付明细表识别`订单编号`，最终输出统一为`业务订单号`。
+4. **代码绝对完整**：包含所有辅助函数及主程序入口，无截断。
 """)
 
 # ================= 辅助函数 =================
@@ -210,17 +212,34 @@ def main():
                 if payment_id_col:
                     df_payment['_clean_oid'] = df_payment[payment_id_col].astype(str).str.strip()
                     df_payment = df_payment[df_payment['_clean_oid'] != '']
-                    df_payment['_amount'] = df_payment['服务费'].apply(safe_float)
                     
+                    # 【核心修复】严格使用“清分金额”列
+                    if '清分金额' in df_payment.columns:
+                        df_payment['_amount'] = df_payment['清分金额'].apply(safe_float)
+                    else:
+                        st.warning("⚠️ 代付记录中未找到‘清分金额’列，代付金额将默认记为0。")
+                        df_payment['_amount'] = 0.0
+                    
+                    # 确保有备注列
                     if '备注' not in df_payment.columns:
                         df_payment['备注'] = ''
                     else:
                         df_payment['备注'] = df_payment['备注'].fillna('')
 
-                    # 【过滤逻辑】剔除备注包含“本金”或“返服务费”的行
-                    mask_exclude = df_payment['备注'].astype(str).str.contains('本金|返服务费', na=False)
-                    df_payment_filtered = df_payment[~mask_exclude]
+                    # 【核心过滤逻辑】
+                    # 1. 必须包含：服务费、延期服务费、罚息、逾期、违约金
+                    include_mask = df_payment['备注'].astype(str).str.contains('服务费|罚息|逾期|违约金', na=False)
+                    # 2. 必须排除：本金、返服务费
+                    exclude_mask = df_payment['备注'].astype(str).str.contains('本金|返服务费', na=False)
                     
+                    # 取交集：在包含列表中，且不在排除列表中
+                    valid_mask = include_mask & (~exclude_mask)
+                    df_payment_filtered = df_payment[valid_mask]
+                    
+                    filtered_out_count = len(df_payment) - len(df_payment_filtered)
+                    if filtered_out_count > 0:
+                        st.info(f"💡 代付记录中已自动过滤掉 {filtered_out_count} 条不符合要求（含本金/返服务费，或无有效服务费/罚息）的数据。")
+
                     grouped = df_payment_filtered.groupby(['_clean_oid', '支付批次号'])
                     runtime_counters = {} 
 
@@ -229,6 +248,7 @@ def main():
                         base_paid = history_map.get(oid, 0)
                         curr_runtime = runtime_counters.get(oid, 0)
                         
+                        # 因为已经提前过滤，这里只需区分是服务费还是罚息
                         service_rows = group[group['备注'].astype(str).str.contains('服务费', na=False)]
                         penalty_rows = group[group['备注'].astype(str).str.contains('罚息|逾期|违约金', na=False, regex=True)]
                         
@@ -265,6 +285,7 @@ def main():
                                 '备注': note
                             })
                             
+                        # 处理只有罚息没有服务费的情况
                         if service_rows.empty and total_penalty > 0:
                             actual_period = base_paid + curr_runtime + 1
                             results.append({
