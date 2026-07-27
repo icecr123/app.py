@@ -125,20 +125,27 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '分期金额': row.get('分期金额', 0)
             }
             
-    # --- V33 核心：构建明细队列 (Detail Queue) ---
+    # --- V33 核心修复：基于时间的精准匹配预处理 ---
+    # 1. 过滤出线下支付明细，并转换时间格式
     detail_queue_map = {}
+    offline_detail_cols = ['订单编号', '支付成功时间', '还款类型']
     
-    if not df_detail.empty:
-        time_col = '支付时间'
-        if '支付时间' in df_detail.columns:
-            df_detail['sort_time'] = pd.to_datetime(df_detail['支付时间'], errors='coerce')
-            df_detail = df_detail.sort_values(by=['订单编号', 'sort_time'])
+    if not df_detail.empty and all(col in df_detail.columns for col in offline_detail_cols):
+        # 假设支付方式列名为 '支付方式'，如果实际名称不同请修改
+        pay_method_col = '支付方式' 
+        if pay_method_col in df_detail.columns:
+            offline_details = df_detail[df_detail[pay_method_col].astype(str).str.contains('线下', na=False)].copy()
+        else:
+            offline_details = df_detail.copy() # 若无该列则全量处理
             
-        grouped_details = df_detail.groupby('订单编号')
+        offline_details['sort_time'] = pd.to_datetime(offline_details['支付成功时间'], errors='coerce')
+        offline_details = offline_details.sort_values(by=['订单编号', 'sort_time']).reset_index(drop=True)
+        
+        # 构建按订单号分组的明细队列
+        grouped_details = offline_details.groupby('订单编号')
         for oid, group in grouped_details:
             clean_oid = clean_order_id(oid)
-            type_list = group['还款类型'].fillna('').astype(str).tolist()
-            detail_queue_map[clean_oid] = type_list
+            detail_queue_map[clean_oid] = group.to_dict('records')
 
     # 政策映射
     policy_map = {}
@@ -156,7 +163,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 
     # 3. 处理分账记录 (线上)
     res_list = []
-    
     for _, row in df_ledger.iterrows():
         oid = clean_order_id(row.get('业务订单号'))
         info = order_map.get(oid, {})
@@ -167,26 +173,20 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             remark_parts.append("延期服务费")
             
         new_row = {
-            '业务订单号': oid,
-            '产品名称': info.get('产品名称', row.get('产品名称', '')),
+            '业务订单号': oid, '产品名称': info.get('产品名称', row.get('产品名称', '')),
             '收款商户': info.get('收款商户', row.get('收款商户', '')),
             '付款人': info.get('付款人', row.get('付款人', '')),
-            '分期金额': row.get('分期金额', 0),
-            '还款期次': period_str,
-            '支付时间': row.get('支付时间', ''),
-            '服务费': row.get('服务费', 0),
-            '逾期费用': row.get('逾期费', row.get('罚息', 0)),
-            '还款方式': '线上还款',
-            '下单时间': info.get('下单时间', ''),
-            '订单状态': info.get('订单状态', ''),
-            '维护商务': info.get('维护商务', ''),
-            '备注': "，".join(remark_parts)
+            '分期金额': row.get('分期金额', 0), '还款期次': period_str,
+            '支付时间': row.get('支付时间', ''), '服务费': row.get('服务费', 0),
+            '逾期费用': row.get('逾期费', row.get('罚息', 0)), '还款方式': '线上还款',
+            '下单时间': info.get('下单时间', ''), '订单状态': info.get('订单状态', ''),
+            '维护商务': info.get('维护商务', ''), '备注': "，".join(remark_parts)
         }
         res_list.append(new_row)
 
-    # 4. 处理代付记录 (线下 - 顺序匹配版)
+    # 4. 处理代付记录 (线下 - 时间对齐匹配版)
     if not df_payment_raw.empty:
-        offline_counter = {}
+        matched_detail_indices = set() # 记录已匹配的明细行索引，防止重复匹配
         
         group_cols = ['业务订单号', '支付批次号']
         if not all(col in df_payment_raw.columns for col in group_cols):
@@ -218,6 +218,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             final_pay_time = service_time if service_time else group.iloc[0].get('完成时间', '')
             remark_parts = ["延期服务费"] if has_delay_note else []
             
+            # --- 核心：基于时间的精准匹配 ---
             repayment_type = ""
             should_increment_counter = True 
             
@@ -225,34 +226,39 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 repayment_type = "" 
                 should_increment_counter = False 
             else:
-                current_idx = offline_counter.get(oid_clean, 0)
                 queue = detail_queue_map.get(oid_clean, [])
-                
-                if current_idx < len(queue):
-                    repayment_type = queue[current_idx]
+                if queue:
+                    pay_dt = pd.to_datetime(final_pay_time, errors='coerce')
+                    best_match_idx = None
+                    min_time_diff = float('inf')
+                    
+                    for idx, detail_row in enumerate(queue):
+                        if idx in matched_detail_indices:
+                            continue
+                        detail_dt = detail_row['sort_time']
+                        if pd.notna(pay_dt) and pd.notna(detail_dt):
+                            abs_diff = abs((pay_dt - detail_dt).total_seconds())
+                            # 时间差在 60秒 内视为匹配成功
+                            if abs_diff < min_time_diff and abs_diff <= 60:
+                                min_time_diff = abs_diff
+                                best_match_idx = idx
+                                
+                    if best_match_idx is not None:
+                        repayment_type = queue[best_match_idx]['还款类型']
+                        matched_detail_indices.add(best_match_idx)
+                    else:
+                        repayment_type = "未匹配到时间对应的明细"
                 else:
-                    repayment_type = f"超出明细范围({current_idx+1})"
-                
-                should_increment_counter = True
-            
-            if should_increment_counter:
-                offline_counter[oid_clean] = offline_counter.get(oid_clean, 0) + 1
+                    repayment_type = "无线下明细记录"
             
             new_row = {
-                '业务订单号': oid_clean,
-                '产品名称': info.get('产品名称', ''),
-                '收款商户': info.get('收款商户', ''),
-                '付款人': info.get('付款人', ''),
-                '分期金额': info.get('分期金额', 0),
-                '还款期次': repayment_type,
-                '支付时间': final_pay_time,
-                '服务费': total_service,
-                '逾期费用': total_overdue,
-                '还款方式': '线下代付',
-                '下单时间': info.get('下单时间', ''),
-                '订单状态': info.get('订单状态', ''),
-                '维护商务': info.get('维护商务', ''),
-                '备注': "，".join(remark_parts)
+                '业务订单号': oid_clean, '产品名称': info.get('产品名称', ''),
+                '收款商户': info.get('收款商户', ''), '付款人': info.get('付款人', ''),
+                '分期金额': info.get('分期金额', 0), '还款期次': repayment_type,
+                '支付时间': final_pay_time, '服务费': total_service,
+                '逾期费用': total_overdue, '还款方式': '线下代付',
+                '下单时间': info.get('下单时间', ''), '订单状态': info.get('订单状态', ''),
+                '维护商务': info.get('维护商务', ''), '备注': "，".join(remark_parts)
             }
             res_list.append(new_row)
 
@@ -272,7 +278,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 
         # 2. 合并同单号特殊费用行
         rows_to_drop = []
-        
         for i in range(len(df_all) - 1, -1, -1):
             row = df_all.iloc[i]
             oid = row['业务订单号']
@@ -285,15 +290,12 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                     if prev_row['业务订单号'] == oid:
                         prev_ovd = safe_float(prev_row['逾期费用'])
                         df_all.at[j, '逾期费用'] = prev_ovd + ovd
-                        
                         prev_remark = str(df_all.at[j, '备注'])
                         curr_remark = str(row['备注'])
                         if curr_remark and curr_remark != 'nan':
                             df_all.at[j, '备注'] = prev_remark + "，含合并逾期费"
-                        
                         rows_to_drop.append(i)
                         break
-                
         if rows_to_drop:
             df_all = df_all.drop(rows_to_drop).reset_index(drop=True)
 
@@ -301,17 +303,10 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     # 5. 时间过滤 (按选择的年月过滤支付时间)
     # ==========================================
     if not df_all.empty:
-        # 将支付时间转换为 datetime 格式
         df_all['支付时间_dt'] = pd.to_datetime(df_all['支付时间'], errors='coerce')
-        
-        # 提取年月，过滤数据
         df_all['year_month'] = df_all['支付时间_dt'].dt.to_period('M')
         target_period = pd.Period(f"{year}-{month:02d}", freq='M')
-        
-        # 仅保留目标月份的数据
         df_all = df_all[df_all['year_month'] == target_period].reset_index(drop=True)
-        
-        # 删除辅助列
         df_all.drop(columns=['支付时间_dt', 'year_month'], inplace=True)
 
     # 6. 计算返佣
@@ -356,13 +351,8 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
         with st.spinner('数据正在飞速计算中，请稍候...'):
             try:
                 result_df = process_data(
-                    uploaded_ledger, 
-                    uploaded_payment, 
-                    uploaded_order, 
-                    uploaded_detail, 
-                    uploaded_policy,
-                    selected_year,
-                    selected_month
+                    uploaded_ledger, uploaded_payment, uploaded_order, 
+                    uploaded_detail, uploaded_policy, selected_year, selected_month
                 )
                 
                 FINAL_COLUMNS = [
@@ -375,7 +365,6 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                 for col in FINAL_COLUMNS:
                     if col not in result_df.columns:
                         result_df[col] = ""
-                        
                 result_df = result_df[FINAL_COLUMNS]
                 
                 output = io.BytesIO()
@@ -390,7 +379,6 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                     file_name=f"月度回款返佣计算结果_{selected_year}{selected_month:02d}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                
                 st.dataframe(result_df.head(10))
                 
             except Exception as e:
