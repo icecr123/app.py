@@ -19,7 +19,7 @@ st.markdown("""
     *   【还款期次】强制留空。
     *   【备注】自动填入“延期服务费”。
 3.  **防御性编程**：
-    *   增加了列名存在性检查，防止因表头微调导致的 KeyError。
+    *   增加了列名存在性检查，防止因表头微调导致程序崩溃。
 """)
 
 # --- 核心逻辑函数 ---
@@ -62,7 +62,7 @@ def calculate_commission(row, policy_map):
     period_str = str(row.get('还款期次', '')).strip()
     amount = safe_float(row.get('分期金额', 0))
     
-    # 如果没有期次（如延期服务费），通常不计算返佣
+    # 如果没有期次（如延期服务费），通常不计算返佣或按特定规则，这里默认不返佣
     if not period_str:
         return pd.Series(['否', '0.0000', 0.0])
 
@@ -191,12 +191,12 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         }
         res_list.append(new_row)
 
-    # 4. 处理代付记录 (线下 - 顺序匹配修复版)
+    # 4. 处理代付记录 (线下 - 专项修复版)
     if not df_payment_raw.empty:
         offline_counter = {} # 记录每个订单当前已经消费到了第几期
         
-        # 关键修复：必须先按 业务订单号 + 支付批次号 排序，保证时间顺序
-        # 假设 支付批次号 越大代表时间越晚，或者直接用索引顺序
+        # --- 关键修复：按 业务订单号 + 支付批次号 排序 ---
+        # 确保先处理批次号小的（通常是第一期），再处理批次号大的
         df_payment_sorted = df_payment_raw.sort_values(by=['业务订单号', '支付批次号'], ascending=True)
         
         # 按 业务订单号 + 支付批次号 分组
@@ -209,6 +209,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             total_service, total_overdue, service_time, is_delay_fee = 0.0, 0.0, None, False
             
             # 检查该批次是否包含“延期服务费”
+            # 只要组内任意一行备注包含“延期服务费”，整组视为延期服务费处理
             for _, r in group.iterrows():
                 note = str(r.get('系统备注', ''))
                 amt = safe_float(r.get('清分金额', 0))
@@ -244,7 +245,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 else:
                     repayment_type = f"超出明细范围({current_count+1})"
                 
-                # 计数器+1，确保下一次该订单的还款能取到下一个期次
+                # 计数器+1
                 offline_counter[oid_clean] = current_count + 1
             
             new_row = {
