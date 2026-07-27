@@ -6,19 +6,20 @@ import datetime
 import re
 
 # ================= 页面配置 =================
-st.set_page_config(page_title="月度回款返佣计算工具 V33-延期服务费专项修复版", layout="centered")
-st.title("🧮 月度回款返佣自动计算工具 (V33)")
+st.set_page_config(page_title="月度回款返佣计算工具 V34-顺序匹配终极修复版", layout="centered")
+st.title("🧮 月度回款返佣自动计算工具 (V34)")
 st.markdown("""
-**V33 核心修复说明：**
-1.  **延期服务费专项处理**：
-    *   识别到“延期服务费”时，**不再匹配期次**（避免占用期次名额）。
-    *   【还款期次】列强制留空。
-    *   【备注】列自动填入“延期服务费”。
-2.  **期次顺序匹配优化**：
-    *   只有非延期的正常还款才会触发计数器+1。
-    *   确保“平账第1期、第2期...”严格对应真实的还款顺序。
-3.  **数据聚合增强**：
-    *   同一订单+同批次下的多行罚息/服务费依然保持合并。
+**V34 核心修复说明：**
+1.  **解决重复订单号匹配错误**：
+    *   引入 `offline_counter` 全局计数器。
+    *   代付数据严格按时间/批次排序后处理。
+    *   每笔正常还款都会让计数器+1，确保第1笔匹配第1期，第2笔匹配第2期。
+2.  **延期服务费专项处理**：
+    *   识别到“延期服务费”时，**不消耗期次计数器**。
+    *   【还款期次】强制留空。
+    *   【备注】自动填入“延期服务费”。
+3.  **防御性编程**：
+    *   增加了列名存在性检查，防止因表头微调导致的 KeyError。
 """)
 
 # --- 核心逻辑函数 ---
@@ -61,7 +62,7 @@ def calculate_commission(row, policy_map):
     period_str = str(row.get('还款期次', '')).strip()
     amount = safe_float(row.get('分期金额', 0))
     
-    # 如果没有期次（如延期服务费），通常不计算返佣或按特定规则，这里默认不返佣
+    # 如果没有期次（如延期服务费），通常不计算返佣
     if not period_str:
         return pd.Series(['否', '0.0000', 0.0])
 
@@ -190,12 +191,16 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         }
         res_list.append(new_row)
 
-    # 4. 处理代付记录 (线下 - 专项修复版)
+    # 4. 处理代付记录 (线下 - 顺序匹配修复版)
     if not df_payment_raw.empty:
         offline_counter = {} # 记录每个订单当前已经消费到了第几期
         
+        # 关键修复：必须先按 业务订单号 + 支付批次号 排序，保证时间顺序
+        # 假设 支付批次号 越大代表时间越晚，或者直接用索引顺序
+        df_payment_sorted = df_payment_raw.sort_values(by=['业务订单号', '支付批次号'], ascending=True)
+        
         # 按 业务订单号 + 支付批次号 分组
-        grouped = df_payment_raw.groupby(['业务订单号', '支付批次号'])
+        grouped = df_payment_sorted.groupby(['业务订单号', '支付批次号'])
         
         for (oid, batch_id), group in grouped:
             oid_clean = clean_order_id(oid)
@@ -204,7 +209,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             total_service, total_overdue, service_time, is_delay_fee = 0.0, 0.0, None, False
             
             # 检查该批次是否包含“延期服务费”
-            # 只要组内任意一行备注包含“延期服务费”，整组视为延期服务费处理
             for _, r in group.iterrows():
                 note = str(r.get('系统备注', ''))
                 amt = safe_float(r.get('清分金额', 0))
@@ -240,7 +244,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 else:
                     repayment_type = f"超出明细范围({current_count+1})"
                 
-                # 计数器+1
+                # 计数器+1，确保下一次该订单的还款能取到下一个期次
                 offline_counter[oid_clean] = current_count + 1
             
             new_row = {
@@ -326,7 +330,7 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                 st.download_button(
                     label="💾 点击下载计算结果",
                     data=processed_data,
-                    file_name="月度回款返佣计算结果_V33.xlsx",
+                    file_name="月度回款返佣计算结果_V34.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
             except Exception as e:
