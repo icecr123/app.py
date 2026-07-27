@@ -371,8 +371,8 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 try:
                     o_date = pd.to_datetime(order_time_str).date()
                     p_date = pd.to_datetime(policy_start_str).date()
-    if o_date < p_date:
-                        df_all.at[idx, '备注'] = str(df_all.at[idx, '备注']) + "，下单早于政策"
+                    if o_date < p_date:
+                        df_all.at[idx, '备注'] = str(df_all.at[idx, '备注']) + "下单早于政策"
                         df_all.at[idx, '返佣金额'] = 0.0
                         df_all.at[idx, '是否有返佣'] = '否'
                 except Exception:
@@ -435,5 +435,3 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                 st.exception(e)
 else:
     st.info("请先上传全部 5 个文件。")
-
- 
