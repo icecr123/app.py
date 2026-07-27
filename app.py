@@ -340,7 +340,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                     o_date = pd.to_datetime(order_time_str).date()
                     p_date = pd.to_datetime(policy_start_str).date()
                     if o_date < p_date:
-                        df_all.at[idx, '备注'] = str(df_all.at[idx, '备注']) + "，下单早于政策"
+                        df_all.at[idx, '备注'] = str(df_all.at[idx, '备注']) + "下单早于政策"
                         df_all.at[idx, '返佣金额'] = 0.0
                         df_all.at[idx, '是否有返佣'] = '否'
                 except Exception:
