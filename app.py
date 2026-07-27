@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 import re
 import io
-from datetime import datetime
 
 # --- 页面配置与时间控制器 ---
 st.set_page_config(page_title="返佣计算小工具 V33", layout="centered")
@@ -74,8 +73,7 @@ def calculate_commission(row, policy_map):
     ratio = 0.0
     has_comm = '否'
     
-    # 如果期次为空（如延期服务费），不参与返佣计算
-    if not period_str or period_str == 'nan':
+    if not period_str:
         return pd.Series(['否', '0.0000', 0.0])
 
     p_num = count_periods(period_str)
@@ -127,37 +125,20 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '分期金额': row.get('分期金额', 0)
             }
             
-    # ==========================================
-    # V33 核心修复：构建精准的“线下还款类型队列”
-    # ==========================================
-    offline_queue_map = {}
+    # --- V33 核心：构建明细队列 (Detail Queue) ---
+    detail_queue_map = {}
     
     if not df_detail.empty:
-        # A. 筛选：只保留“支付方式”包含“线下”的记录
-        # 注意：这里假设列名为“支付方式”，请根据实际表头调整
-        if '支付方式' in df_detail.columns:
-            df_offline_details = df_detail[df_detail['支付方式'].astype(str).str.contains('线下', na=False)].copy()
-        else:
-            # 如果没有该列，退而求其次使用全量数据（但这可能导致你之前的错误）
-            st.warning("未在明细表中找到'支付方式'列，将尝试使用所有记录进行匹配。")
-            df_offline_details = df_detail.copy()
-
-        # B. 排序：按订单号 + 支付成功时间 升序排列
-        time_col = '支付成功时间'
-        if time_col in df_offline_details.columns:
-            df_offline_details['sort_time'] = pd.to_datetime(df_offline_details[time_col], errors='coerce')
-            df_offline_details = df_offline_details.sort_values(by=['订单编号', 'sort_time'])
-        else:
-             st.error(f"明细表中缺少关键列：'{time_col}'，无法进行时间排序匹配！")
-             return pd.DataFrame()
+        time_col = '支付时间'
+        if '支付时间' in df_detail.columns:
+            df_detail['sort_time'] = pd.to_datetime(df_detail['支付时间'], errors='coerce')
+            df_detail = df_detail.sort_values(by=['订单编号', 'sort_time'])
             
-        # C. 建队：按订单分组，提取还款类型列表
-        grouped_details = df_offline_details.groupby('订单编号')
+        grouped_details = df_detail.groupby('订单编号')
         for oid, group in grouped_details:
             clean_oid = clean_order_id(oid)
-            # 提取还款类型列，转为列表
             type_list = group['还款类型'].fillna('').astype(str).tolist()
-            offline_queue_map[clean_oid] = type_list
+            detail_queue_map[clean_oid] = type_list
 
     # 政策映射
     policy_map = {}
@@ -205,7 +186,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 
     # 4. 处理代付记录 (线下 - 顺序匹配版)
     if not df_payment_raw.empty:
-        # 全局计数器，记录每个订单号已经匹配了多少次（用于索引队列）
         offline_counter = {}
         
         group_cols = ['业务订单号', '支付批次号']
@@ -221,7 +201,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             
             total_service, total_overdue, service_time, has_delay_note = 0.0, 0.0, None, False
             
-            # 遍历当前组（同批次）的所有行，累加金额
             for _, r in group.iterrows():
                 note = str(r.get('系统备注', ''))
                 amt = safe_float(r.get('清分金额', 0))
@@ -239,34 +218,23 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             final_pay_time = service_time if service_time else group.iloc[0].get('完成时间', '')
             remark_parts = ["延期服务费"] if has_delay_note else []
             
-            # ==========================================
-            # V33 核心匹配逻辑：基于序号的精准映射
-            # ==========================================
             repayment_type = ""
             should_increment_counter = True 
             
-            # 1. 检查是否为延期服务费
             if has_delay_note:
-                repayment_type = "" # 置空
-                should_increment_counter = False # 不消耗计数器
+                repayment_type = "" 
+                should_increment_counter = False 
             else:
-                # 2. 正常匹配逻辑
-                # 获取当前订单的计数器位置（即这是该订单的第几次线下还款）
                 current_idx = offline_counter.get(oid_clean, 0)
-                
-                # 从预处理的“线下专属队列”中获取对应索引的类型
-                queue = offline_queue_map.get(oid_clean, [])
+                queue = detail_queue_map.get(oid_clean, [])
                 
                 if current_idx < len(queue):
                     repayment_type = queue[current_idx]
                 else:
-                    # 如果超出了队列长度，说明明细里没这么多条线下记录
-                    repayment_type = f"未匹配到时间对应的明细(共{len(queue)}条)"
+                    repayment_type = f"超出明细范围({current_idx+1})"
                 
-                # 标记需要增加计数器
                 should_increment_counter = True
             
-            # 3. 更新计数器
             if should_increment_counter:
                 offline_counter[oid_clean] = offline_counter.get(oid_clean, 0) + 1
             
@@ -302,7 +270,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         )
         df_all = df_all[~condition_invalid].reset_index(drop=True)
 
-        # 2. 合并同单号特殊费用行 (仅含逾期费的行合并到上一行)
+        # 2. 合并同单号特殊费用行
         rows_to_drop = []
         
         for i in range(len(df_all) - 1, -1, -1):
@@ -311,23 +279,18 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             svc = safe_float(row['服务费'])
             ovd = safe_float(row['逾期费用'])
             
-            # 只有当服务费为0且逾期费大于0时触发合并
             if svc == 0 and ovd > 0:
-                # 向上寻找同一个订单号的记录
                 for j in range(i - 1, -1, -1):
                     prev_row = df_all.iloc[j]
                     if prev_row['业务订单号'] == oid:
-                        # 执行合并
                         prev_ovd = safe_float(prev_row['逾期费用'])
                         df_all.at[j, '逾期费用'] = prev_ovd + ovd
                         
-                        # 更新备注
                         prev_remark = str(df_all.at[j, '备注'])
                         curr_remark = str(row['备注'])
                         if curr_remark and curr_remark != 'nan':
                             df_all.at[j, '备注'] = prev_remark + "，含合并逾期费"
                         
-                        # 标记当前行待删除
                         rows_to_drop.append(i)
                         break
                 
