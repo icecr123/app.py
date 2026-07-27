@@ -4,22 +4,16 @@ import numpy as np
 import re
 import io
 
-# --- 页面配置 ---
-st.set_page_config(page_title="返佣计算小工具 V33-顺序匹配修正版", layout="centered")
-st.title("🧮 月度回款返佣自动计算工具 (V33-顺序匹配修正版)")
-st.markdown("""
-**V33 核心修复说明：**
-1.  **顺序匹配逻辑（防重）**：
-    *   **前置处理**：基于【订单支付明细】构建有序的“还款类型队列”。
-    *   **动态指针**：在匹配【代付记录】时，根据订单号出现的次数（第1次、第2次...），依次从队列中取出对应的还款类型。
-    *   **效果**：彻底解决重复订单号重复匹配首行的问题。
-2.  **延期服务费特殊处理**：
-    *   **不占期次**：识别到“延期服务费”时，不消耗顺序计数器。
-    *   **置空与备注**：直接将【还款期次】置空，并在备注中标记。
-3.  **数据清洗与合并**：
-    *   **无效删除**：自动删除【线下代付】中服务费和逾期费用均为 0 的无效行。
-    *   **费用归集（新增）**：若同一订单出现“仅含逾期费”的行，自动将其合并至该订单的上一行记录中。
-""")
+# --- 页面配置与时间控制器 ---
+st.set_page_config(page_title="返佣计算小工具 V33", layout="centered")
+st.title("🧮 月度回款返佣自动计算工具 (V33)")
+
+# 时间控制器
+col_year, col_month = st.columns(2)
+with col_year:
+    selected_year = st.selectbox("选择年份", [2023, 2024, 2025, 2026], index=2)
+with col_month:
+    selected_month = st.selectbox("选择月份", list(range(1, 13)), index=5)
 
 # --- 核心逻辑函数 ---
 
@@ -79,7 +73,6 @@ def calculate_commission(row, policy_map):
     ratio = 0.0
     has_comm = '否'
     
-    # 如果期次为空（如延期服务费），不参与返佣计算或按特定逻辑
     if not period_str:
         return pd.Series(['否', '0.0000', 0.0])
 
@@ -109,7 +102,7 @@ def calculate_commission(row, policy_map):
 
 # --- 主处理流程 ---
 
-def process_data(ledger_file, payment_file, order_file, detail_file, policy_file):
+def process_data(ledger_file, payment_file, order_file, detail_file, policy_file, year, month):
     # 1. 读取所有文件
     df_ledger = pd.read_excel(ledger_file, dtype=str)
     df_payment_raw = pd.read_excel(payment_file, dtype=str)
@@ -133,8 +126,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             }
             
     # --- V33 核心：构建明细队列 (Detail Queue) ---
-    # 结构: { '订单号': ['正常还款', '正常还款', '结清', ...] }
-    # 按支付时间排序，确保顺序一致
     detail_queue_map = {}
     
     if not df_detail.empty:
@@ -166,7 +157,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     # 3. 处理分账记录 (线上)
     res_list = []
     
-    # --- 线上逻辑 ---
     for _, row in df_ledger.iterrows():
         oid = clean_order_id(row.get('业务订单号'))
         info = order_map.get(oid, {})
@@ -195,7 +185,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         res_list.append(new_row)
 
     # 4. 处理代付记录 (线下 - 顺序匹配版)
-    # --- V33 核心：线下代付顺序匹配 ---
     if not df_payment_raw.empty:
         offline_counter = {}
         
@@ -229,7 +218,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             final_pay_time = service_time if service_time else group.iloc[0].get('完成时间', '')
             remark_parts = ["延期服务费"] if has_delay_note else []
             
-            # --- V33 核心匹配逻辑 ---
             repayment_type = ""
             should_increment_counter = True 
             
@@ -271,10 +259,10 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     df_all = pd.DataFrame(res_list)
     
     # ==========================================
-    # V33 新增：数据清洗与合并工序
+    # V33 数据清洗与合并工序
     # ==========================================
     if not df_all.empty:
-        # 1. 删除无效代付记录 (服务费=0 且 逾期费用=0)
+        # 1. 删除无效代付记录
         condition_invalid = (
             (df_all['还款方式'] == '线下代付') & 
             (df_all['服务费'] == 0) & 
@@ -283,50 +271,57 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         df_all = df_all[~condition_invalid].reset_index(drop=True)
 
         # 2. 合并同单号特殊费用行
-        # 逻辑：若某行服务费=0 但 逾期费用>0，尝试将其合并到该订单号的上一行
         rows_to_drop = []
         
-        # 倒序遍历，避免索引变动影响后续处理
         for i in range(len(df_all) - 1, -1, -1):
             row = df_all.iloc[i]
             oid = row['业务订单号']
             svc = safe_float(row['服务费'])
             ovd = safe_float(row['逾期费用'])
             
-            # 判定条件：服务费为0 且 逾期费用大于0
             if svc == 0 and ovd > 0:
-                # 向前查找同一订单号的行
-                merged = False
                 for j in range(i - 1, -1, -1):
                     prev_row = df_all.iloc[j]
                     if prev_row['业务订单号'] == oid:
-                        # 执行合并：将当前行的逾期费加到上一行
                         prev_ovd = safe_float(prev_row['逾期费用'])
                         df_all.at[j, '逾期费用'] = prev_ovd + ovd
                         
-                        # 可选：更新备注，标记已合并
                         prev_remark = str(df_all.at[j, '备注'])
                         curr_remark = str(row['备注'])
                         if curr_remark and curr_remark != 'nan':
                             df_all.at[j, '备注'] = prev_remark + "，含合并逾期费"
                         
-                        # 标记当前行待删除
                         rows_to_drop.append(i)
-                        merged = True
                         break
                 
-        # 执行删除操作
         if rows_to_drop:
             df_all = df_all.drop(rows_to_drop).reset_index(drop=True)
 
-    # 5. 计算返佣
+    # ==========================================
+    # 5. 时间过滤 (按选择的年月过滤支付时间)
+    # ==========================================
+    if not df_all.empty:
+        # 将支付时间转换为 datetime 格式
+        df_all['支付时间_dt'] = pd.to_datetime(df_all['支付时间'], errors='coerce')
+        
+        # 提取年月，过滤数据
+        df_all['year_month'] = df_all['支付时间_dt'].dt.to_period('M')
+        target_period = pd.Period(f"{year}-{month:02d}", freq='M')
+        
+        # 仅保留目标月份的数据
+        df_all = df_all[df_all['year_month'] == target_period].reset_index(drop=True)
+        
+        # 删除辅助列
+        df_all.drop(columns=['支付时间_dt', 'year_month'], inplace=True)
+
+    # 6. 计算返佣
     if not df_all.empty:
         comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
         df_all['是否有返佣'] = comm_results[0]
         df_all['返佣比例'] = comm_results[1]
         df_all['返佣金额'] = comm_results[2]
         
-        # 6. 补充日期备注与校验
+        # 7. 补充日期备注与校验
         for idx, row in df_all.iterrows():
              order_time_str = str(row.get('下单时间', '')).strip()
              merchant = str(row.get('收款商户', '')).strip()
@@ -340,7 +335,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                     o_date = pd.to_datetime(order_time_str).date()
                     p_date = pd.to_datetime(policy_start_str).date()
                     if o_date < p_date:
-                        df_all.at[idx, '备注'] = str(df_all.at[idx, '备注']) + "下单早于政策"
+                        df_all.at[idx, '备注'] = str(df_all.at[idx, '备注']) + "，下单早于政策"
                         df_all.at[idx, '返佣金额'] = 0.0
                         df_all.at[idx, '是否有返佣'] = '否'
                 except Exception:
@@ -350,22 +345,26 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 
 # --- 网页界面部分 ---
 
-# 创建文件上传器
 uploaded_ledger = st.file_uploader("1. 上传《分账支付记录.xls》", type=['xls', 'xlsx'])
 uploaded_payment = st.file_uploader("2. 上传《代付记录.xls》", type=['xls', 'xlsx'])
 uploaded_order = st.file_uploader("3. 上传《订单.xls》", type=['xls', 'xlsx'])
 uploaded_detail = st.file_uploader("4. 上传《订单支付明细.xlsx》", type=['xls', 'xlsx'])
 uploaded_policy = st.file_uploader("5. 上传《返佣政策详情.xls》", type=['xls', 'xlsx'])
 
-# 当所有文件都上传后，显示计算按钮
 if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):
     if st.button('🚀 开始计算', type='primary'):
         with st.spinner('数据正在飞速计算中，请稍候...'):
             try:
-                # 调用主函数处理数据
-                result_df = process_data(uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy)
+                result_df = process_data(
+                    uploaded_ledger, 
+                    uploaded_payment, 
+                    uploaded_order, 
+                    uploaded_detail, 
+                    uploaded_policy,
+                    selected_year,
+                    selected_month
+                )
                 
-                # 定义最终输出的标准列头
                 FINAL_COLUMNS = [
                     '业务订单号', '产品名称', '收款商户', '付款人', '分期金额', 
                     '还款期次', '支付时间', '服务费', '逾期费用', '还款方式', 
@@ -373,29 +372,25 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                     '返佣金额', '备注'
                 ]
                 
-                # 确保所有列都存在
                 for col in FINAL_COLUMNS:
                     if col not in result_df.columns:
                         result_df[col] = ""
                         
                 result_df = result_df[FINAL_COLUMNS]
                 
-                # 将结果转换为 Excel 文件并放入内存
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     result_df.to_excel(writer, index=False, sheet_name='返佣计算结果')
                 processed_data = output.getvalue()
                 
-                # 提供下载按钮
-                st.success("计算完成！")
+                st.success(f"计算完成！当前输出范围：{selected_year}年{selected_month}月")
                 st.download_button(
                     label="💾 点击下载计算结果",
                     data=processed_data,
-                    file_name="月度回款返佣计算结果_V33.xlsx",
+                    file_name=f"月度回款返佣计算结果_{selected_year}{selected_month:02d}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
-                # 预览
                 st.dataframe(result_df.head(10))
                 
             except Exception as e:
