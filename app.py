@@ -1,331 +1,300 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
-from io import BytesIO
-import datetime
+import warnings
 import re
+import os
 
-# ================= 页面配置 =================
-st.set_page_config(page_title="月度回款返佣计算工具 V30-逻辑修正版", layout="wide")
-st.title("🧮 月度回款返佣自动计算工具 (V30-逻辑修正版)")
-st.markdown("""
-**V30 核心修复说明：**
-1. **代付合并逻辑修正**：
-   - **同批次合并**：同一订单+同批次下，1行服务费+N行罚息 -> 合并为1行。
-   - **跨批次独立**：同一订单+不同批次 -> 独立成行，不混淆金额。
-2. **期次顺序匹配（防重）**：
-   - 引入全局计数器，严格按还款笔数顺序匹配【订单支付明细】中的期次。
-   - 避免同一订单的多笔还款匹配到同一个期次。
-3. **政策精准匹配**：基于机构+期数+还款方式匹配返佣开始时间。
-""")
+# 忽略 Pandas 的一些样式警告
+warnings.filterwarnings('ignore')
 
-# ================= 辅助函数 =================
+# ================= 配置区域 =================
+FILE_LEDGER = '分账支付记录.xls'      # 来源1：线上还款
+FILE_PAYMENT = '代付记录.xls'         # 来源2：线下还款
+FILE_ORDER_MAIN = '订单.xls'          # 主订单信息表 (含分期金额、下单时间)
+FILE_ORDER_DETAIL = '订单支付明细.xlsx' # 用于匹配代付的还款期次
+FILE_POLICY = '返佣政策详情.xls'      # 返佣政策表
+OUTPUT_FILE = '月度回款返佣计算结果_精准匹配版.xlsx'
 
+# 定义最终输出的标准列头
+FINAL_COLUMNS = [
+    '业务订单号', '产品名称', '收款商户', '付款人', '分期金额', '还款期次', '支付时间',
+    '服务费', '逾期费用', '还款方式', '下单时间', '订单状态', '维护商务',
+    '是否有返佣', '返佣比例', '返佣金额', '备注'
+]
+
+# ================= 工具函数 =================
 def safe_float(val):
-    """安全转换金额"""
-    if isinstance(val, pd.Series):
-        val = val.iloc[0] if not val.empty else 0
+    """安全转换浮点数"""
     if pd.isna(val): return 0.0
     s = str(val).strip()
-    if s in ['无', 'None', 'nan', '', '-']: return 0.0
+    if s in ['无', 'None', 'nan', '']: return 0.0
+    try: return float(s)
+    except ValueError: return 0.0
+
+def clean_order_id(order_id):
+    """清洗订单号，去除 .0 后缀"""
+    if pd.isna(order_id): return ''
+    s = str(order_id).strip()
+    if s.endswith('.0'): s = s[:-2]
+    return s
+
+def parse_xy_product(product_name):
+    """解析 X+Y 格式的产品名称"""
+    if pd.isna(product_name): return False, 0, 0
+    name_str = str(product_name).strip()
+    match = re.search(r'(\d+)\+(\d+)', name_str)
+    if match: return True, int(match.group(1)), int(match.group(2))
+    return False, 0, 0
+
+def count_periods(period_str):
+    """使用正则通杀逻辑统计期数"""
+    if pd.isna(period_str): return 1
+    p_str = str(period_str)
+    numbers = re.findall(r'\d+', p_str)
+    return max(len(numbers), 1)
+
+def calculate_commission(row, policy_map):
+    """核心返佣计算逻辑"""
+    merchant = str(row.get('收款商户', '')).strip()
+    product = str(row.get('产品名称', '')).strip()
+    period_str = str(row.get('还款期次', '')).strip()
+    amount = safe_float(row.get('分期金额', 0))
+
+    # 1. 获取策略字典
+    key = f"{merchant}_{product}"
+    policy = policy_map.get(key, {})
+    if not policy: return pd.Series(['否', '0.0000', 0.0])
+
+    # 2. 判断产品类型 (X+Y 还是 等额)
+    is_xy, x_val, y_val = parse_xy_product(product)
+    ratio = 0.0
+    has_comm = '否'
+
+    # 3. 统计还款期次
+    p_num = count_periods(period_str)
+
+    if is_xy:
+        # 取最后一期来判断是X段还是Y段
+        last_period = 0
+        numbers = re.findall(r'\d+', period_str)
+        if numbers: last_period = int(numbers[-1])
+        if 0 < last_period <= x_val:
+            raw_ratio = policy.get('X-返佣', 0)
+        else:
+            raw_ratio = policy.get('Y-返佣', 0)
+    else:
+        # 等额本息逻辑
+        raw_ratio = policy.get('等额-返佣', 0)
+
+    # 4. 安全转换比例并计算金额
+    ratio = safe_float(raw_ratio)
+    if ratio > 0:
+        has_comm = '是'
+        comm_amount = amount * ratio * p_num
+        return pd.Series([has_comm, f"{ratio:.4f}", round(comm_amount, 2)])
+    
+    return pd.Series([has_comm, f"{ratio:.4f}", 0.0])
+
+# ================= 主流程 =================
+def process_data():
+    print("开始执行数据清洗与计算...")
+    print("="*40)
+
+    # --- 1. 读取所有文件 ---
     try:
-        return float(s.replace(',', ''))
-    except ValueError:
-        return 0.0
+        df_ledger = pd.read_excel(FILE_LEDGER, dtype=str)
+        print(f"[OK] 读取分账记录: {len(df_ledger)} 条")
+    except Exception as e: print(f"[ERR] 分账记录读取失败: {e}"); return
 
-def clean_str(val):
-    """清洗字符串"""
-    if pd.isna(val): return ""
-    return str(val).strip()
+    try:
+        df_payment_raw = pd.read_excel(FILE_PAYMENT, dtype=str)
+        print(f"[OK] 读取代付记录(原始): {len(df_payment_raw)} 条")
+    except Exception as e: print(f"[ERR] 代付记录读取失败: {e}"); return
 
-def parse_period(period_str):
-    """提取期数数字，用于模糊匹配政策表 (例如 '3期(用户)' -> 3)"""
-    if pd.isna(period_str): return None
-    s = str(period_str)
-    match = re.search(r'(\d+)', s)
-    return int(match.group(1)) if match else None
+    try:
+        df_order = pd.read_excel(FILE_ORDER_MAIN, dtype=str)
+        print(f"[OK] 读取订单主表: {len(df_order)} 条")
+    except Exception as e: print(f"[ERR] 订单主表读取失败: {e}"); return
 
-# ================= 核心处理逻辑 =================
+    try:
+        df_detail = pd.read_excel(FILE_ORDER_DETAIL, dtype=str)
+        print(f"[OK] 读取订单支付明细: {len(df_detail)} 条")
+    except Exception as e: print(f"[ERR] 订单支付明细读取失败: {e}"); return
 
-def process_data(order_df, detail_df, offline_df, online_df, policy_df):
-    results = []
+    try:
+        df_policy_raw = pd.read_excel(FILE_POLICY, dtype=str)
+        print(f"[OK] 读取返佣政策: {len(df_policy_raw)} 条")
+    except Exception as e: print(f"[ERR] 返佣政策读取失败: {e}"); return
+
+    # --- 2. 预处理：建立映射字典 ---
     
-    # 1. 预处理订单主表
+    # A. 订单信息映射 (主表)
     order_map = {}
-    if order_df is not None and not order_df.empty:
-        for _, row in order_df.iterrows():
-            oid = clean_str(row.get('订单号'))
-            if oid:
-                order_map[oid] = row
+    for _, row in df_order.iterrows():
+        oid = clean_order_id(row.get('订单号'))
+        if oid:
+            order_map[oid] = {
+                '产品名称': row.get('产品名称', ''),
+                '下单时间': row.get('下单时间', ''),
+                '订单状态': row.get('订单状态', ''),
+                '维护商务': row.get('业务员', ''),
+                '付款人': row.get('客户姓名', ''),
+                '收款商户': row.get('机构简称', ''),
+                '分期金额': row.get('分期金额', 0)
+            }
 
-    # 2. 预处理订单支付明细（构建期次队列）
-    # 结构：{订单编号: [list of repayment_types]}
-    detail_queue_map = {}
-    if detail_df is not None and not detail_df.empty:
-        # 确保有时间列用于排序
-        time_col = '支付时间'
-        if '支付时间_dt' in detail_df.columns:
-            time_col = '支付时间_dt'
-        elif '支付时间' in detail_df.columns:
-             detail_df['支付时间_dt'] = pd.to_datetime(detail_df['支付时间'], errors='coerce')
-             time_col = '支付_time_dt'
-        
-        # 筛选支付方式为"线下"的记录（根据需求描述）
-        # 注意：如果明细表里既有有线上又有线下，必须过滤。如果全是线下则不用过滤。
-        # 这里假设需要过滤，如果不需要可注释掉 mask_offline
-        mask_offline = detail_df['支付方式'].astype(str).str.contains('线下', na=False)
-        filtered_detail = detail_df[mask_offline].copy() if '支付方式' in detail_df.columns else detail_df.copy()
-
-        if not filtered_detail.empty and time_col in filtered_detail.columns:
-            grouped_details = filtered_detail.groupby('订单编号')
-            for oid, group in grouped_details:
-                sorted_group = group.sort_values(by=time_col, ascending=True)
-                queue = sorted_group['还款类型'].tolist()
-                detail_queue_map[clean_str(oid)] = queue
-
-    # 3. 预处理返佣政策表
-    # 构建 Key: (机构名称, 期数数字, 还款方式) -> 返佣开始时间
+    # B. 返佣政策映射
     policy_map = {}
-    if policy_df is not None and not policy_df.empty:
-        for _, row in policy_df.iterrows():
-            inst_name = clean_str(row.get('机构名称'))
-            prod_name = clean_str(row.get('产品名称')) # 如 "3期(用户)"
-            repay_way = clean_str(row.get('还款方式'))
-            start_time_str = clean_str(row.get('返佣开始时间'))
-            
-            period_num = parse_period(prod_name)
-            
-            if inst_name and period_num:
-                key = (inst_name, period_num, repay_way)
-                policy_map[key] = start_time_str
+    for _, row in df_policy_raw.iterrows():
+        inst = str(row.get('机构名称', '')).strip()
+        prod = str(row.get('产品名称', '')).strip()
+        if inst and prod:
+            key = f"{inst}_{prod}"
+            policy_map[key] = {
+                '等额-返佣': row.get('等额-返佣', 0),
+                'X-返佣': row.get('X-返佣', 0),
+                'Y-返佣': row.get('Y-返佣', 0),
+                '返佣开始时间': str(row.get('返佣开始时间', '')).strip()
+            }
 
-    # 4. 全局计数器：用于线下代付的期次顺序匹配
-    offline_repay_counter = {} 
+    # C. 【关键修改】为订单支付明细生成还款序号
+    # 按订单编号分组，为每笔还款记录打上序号 (1, 2, 3...)
+    df_detail['还款序号'] = df_detail.groupby('订单编号').cumcount() + 1
+    # 创建一个以 (订单编号, 还款序号) 为索引的 Series，方便快速查找还款类型
+    detail_type_map = df_detail.set_index(['订单编号', '还款序号'])['还款类型']
+    print(f"[OK] 已为订单支付明细生成还款序号，共 {len(detail_type_map)} 个唯一期次记录。")
 
-    # 5. 处理线下代付记录 (Offline Data)
-    if offline_df is not None and not offline_df.empty:
-        # 5.1 过滤备注
-        mask_include = offline_df['系统备注'].astype(str).str.contains(r'服务费|延期|罚息|逾期|违约金', na=False)
-        mask_exclude = offline_df['系统备注'].astype(str).str.contains(r'本金|返服务费', na=False)
-        filtered_offline = offline_df[mask_include & ~mask_exclude].copy()
+    # --- 3. 处理分账记录 (线上) ---
+    print("正在处理分账记录...")
+    res_list = []
+    for _, row in df_ledger.iterrows():
+        oid = clean_order_id(row.get('业务订单号'))
+        info = order_map.get(oid, {})
+        period_str = str(row.get('还款期次', ''))
+        remark_parts = []
+        if '延期手续费' in period_str: remark_parts.append("延期服务费")
         
-        if not filtered_offline.empty:
-            # 5.2 分组处理：按 业务订单号 + 支付批次号 分组
-            # 这一步是关键：保证了"同批次"的数据在一起，"不同批次"的数据分开
-            grouped_offline = filtered_offline.groupby(['业务订单号', '支付批次号'])
-            
-            for (oid, batch_id), group in grouped_offline:
-                remarks = group['系统备注'].astype(str).tolist()
-                
-                total_penalty = 0.0
-                service_fee_row = None
-                
-                # 遍历当前组（同批次）的所有行
-                for _, row in group.iterrows():
-                    remark = str(row.get('系统备注', ''))
-                    amount = safe_float(row.get('清分金额', 0))
-                    
-                    # 识别服务费行
-                    if '服务费' in remark:
-                        service_fee_row = row.copy()
-                        # 初始化合并金额
-                        if '罚息' not in remark and '逾期' not in remark and '违约金' not in remark:
-                             service_fee_row['merged_amount'] = amount
-                        else:
-                             service_fee_row['merged_amount'] = amount 
-                    # 识别罚息行
-                    elif any(k in remark for k in ['罚息', '逾期', '违约金']):
-                        total_penalty += amount
-                
-                final_rows = []
-                
-                # 逻辑分支：
-                # 情况A：有服务费行 -> 将同批次的罚息合并进去，生成1行
-                if service_fee_row is not None:
-                    base_row = service_fee_row
-                    base_row['merged_amount'] = safe_float(base_row.get('merged_amount', 0)) + total_penalty
-                    final_rows.append(base_row)
-                # 情况B：没有服务费行，只有罚息 -> 单独成行（通常不应该发生，但做防御性处理）
-                else:
-                    if total_penalty > 0:
-                        base_row = group.iloc[0].copy()
-                        base_row['merged_amount'] = total_penalty
-                        final_rows.append(base_row)
-                
-                # 5.3 生成结果行并匹配期次
-                for row in final_rows:
-                    # 【关键】获取期次：按顺序消费
-                    current_repayment_type = get_next_repayment_type(oid, offline_repay_counter, detail_queue_map)
-                    
-                    res = build_result_row(
-                        row, oid, order_map, policy_map,
-                        source_type='offline',
-                        repayment_type=current_repayment_type
-                    )
-                    if res:
-                        results.append(res)
+        new_row = {
+            '业务订单号': oid,
+            '产品名称': info.get('产品名称', row.get('产品名称', '')),
+            '收款商户': info.get('收款商户', row.get('收款商户', '')),
+            '付款人': info.get('付款人', row.get('付款人', '')),
+            '分期金额': row.get('分期金额', 0),
+            '还款期次': period_str,
+            '支付时间': row.get('支付时间', ''),
+            '服务费': row.get('服务费', 0),
+            '逾期费用': row.get('逾期费', row.get('罚息', 0)),
+            '还款方式': '线上还款',
+            '下单时间': info.get('下单时间', ''),
+            '订单状态': info.get('订单状态', ''),
+            '维护商务': info.get('维护商务', ''),
+            '备注': "，".join(remark_parts)
+        }
+        res_list.append(new_row)
 
-    # 6. 处理线上分账记录 (Online Data)
-    if online_df is not None and not online_df.empty:
-        for _, row in online_df.iterrows():
-            oid = clean_str(row.get('订单编号'))
-            
-            # 线上直接用表里的期次，或者如果没有则尝试匹配（视情况而定，这里优先用表里的）
-            repayment_type = clean_str(row.get('还款类型', row.get('期数', '')))
-            
-            res = build_result_row(
-                row, oid, order_map, policy_map,
-                source_type='online',
-                repayment_type=repayment_type
-            )
-            if res:
-                results.append(res)
-
-    return pd.DataFrame(results)
-
-def get_next_repayment_type(oid, counter_map, queue_map):
-    """
-    获取下一个可用的还款期次（按顺序消费）
-    """
-    if oid not in queue_map:
-        return "未匹配到明细"
-    
-    queue = queue_map[oid]
-    current_index = counter_map.get(oid, 0)
-    
-    if current_index < len(queue):
-        rep_type = queue[current_index]
-        counter_map[oid] = current_index + 1 # 计数器+1，下次取下一行
-        return clean_str(rep_type)
-    else:
-        return f"超出明细范围({current_index+1})"
-
-def build_result_row(row, oid, order_map, policy_map, source_type, repayment_type):
-    """构建单行结果数据"""
-    res = {
-        '业务订单号': oid,
-        '数据来源': '线下代付' if source_type == 'offline' else '线上分账',
-        '支付时间': row.get('支付时间', ''),
-        '支付批次号': row.get('支付批次号', '') if source_type == 'offline' else '',
-        '还款方式': repayment_type
-    }
-
-    # 字段映射
-    if source_type == 'offline':
-        res['分账金额'] = safe_float(row.get('merged_amount', row.get('清分金额', 0)))
-        res['产品名称'] = '' 
-        res['收款商户'] = ''
-        res['付款人'] = ''
-    else:
-        res['分账金额'] = safe_float(row.get('分账金额', 0))
-        res['产品名称'] = clean_str(row.get('产品名称', ''))
-        res['收款商户'] = clean_str(row.get('收款商户', ''))
-        res['付款人'] = clean_str(row.get('付款人', ''))
-
-    # 关联订单主表
-    order_info = order_map.get(oid)
-    institution_name = "" # 用于匹配政策
-    
-    if order_info is not None:
-        res['下单时间'] = order_info.get('下单时间', '')
-        res['订单状态'] = order_info.get('订单状态', '')
-        res['维护商务'] = order_info.get('维护商务', '')
-        res['是否有返佣'] = order_info.get('是否有返佣', '否')
-        res['返佣比例'] = safe_float(order_info.get('返佣比例', 0))
-        res['返佣金额'] = res['分账金额'] * res['返佣比例']
+    # --- 4. 处理代付记录 (线下 - 精准匹配版) ---
+    print("正在处理代付记录 (执行精准匹配)...")
+    if not df_payment_raw.empty:
+        # 【关键修改】为代付记录也生成还款序号
+        df_payment_raw['还款序号'] = df_payment_raw.groupby('业务订单号').cumcount() + 1
         
-        # 获取机构名称用于政策匹配
-        institution_name = clean_str(order_info.get('机构名称', ''))
-    else:
-        res['下单时间'] = ''
-        res['订单状态'] = '未匹配到主表'
-        res['维护商务'] = ''
-        res['是否有返佣'] = '否'
-        res['返佣比例'] = 0
-        res['返佣金额'] = 0
-
-    # 备注生成 & 政策时间判断
-    note_parts = []
-    raw_note = clean_str(row.get('系统备注' if source_type=='offline' else '备注', ''))
-    if raw_note:
-        note_parts.append(raw_note)
-    
-    # 动态政策匹配逻辑
-    policy_start_date = None
-    if institution_name and repayment_type:
-        # 尝试从还款类型中提取期数数字 (例如 "3期" -> 3)
-        period_num = parse_period(repayment_type)
+        # 按批次和订单号分组进行聚合
+        grouped = df_payment_raw.groupby(['支付批次号', '业务订单号', '还款序号'])
         
-        if period_num:
-            # 尝试精确匹配 (机构, 期数, 还款方式)
-            # 注意：这里的"还款方式"在policy_map的key中可能需要根据实际业务调整
-            # 假设 policy_map 的 key 是 (机构名, 期数, 任意/具体方式)
-            # 这里简化处理：只要机构名和期数对上，就取时间
-            # 如果需要严格匹配第三个维度，需补充逻辑
+        for (batch_id, oid, seq_num), group in grouped:
+            oid_clean = clean_order_id(oid)
+            info = order_map.get(oid_clean, {})
             
-            # 遍历 policy_map 寻找最匹配的
-            for (p_inst, p_period, p_way), p_time in policy_map.items():
-                if p_inst == institution_name and p_period == period_num:
-                    policy_start_date = p_time
-                    break
-    
-    if policy_start_date:
-        order_time_str = res.get('下单时间', '')
-        if order_time_str:
+            total_service = 0.0
+            total_overdue = 0.0
+            service_time = None
+            has_delay_note = False
+            
+            for _, r in group.iterrows():
+                note = str(r.get('系统备注', ''))
+                amt = safe_float(r.get('清分金额', 0))
+                finish_time = r.get('完成时间', '')
+                
+                if '服务费' in note and '返服务费' not in note:
+                    total_service += amt
+                    if pd.notna(finish_time) and str(finish_time).strip() != '':
+                        service_time = finish_time
+                elif '罚息' in note or '逾期' in note:
+                    total_overdue += amt
+                if '延期服务费' in note:
+                    has_delay_note = True
+
+            # 【关键修改】使用 (业务订单号, 还款序号) 双键匹配还款类型
+            period_type = ''
+            if oid_clean in df_detail['订单编号'].values:
+                # 尝试从映射中获取还款类型
+                period_type = detail_type_map.get((oid_clean, seq_num), '')
+            
+            final_pay_time = service_time if service_time else group.iloc[0].get('完成时间', '')
+            remark_parts = []
+            if has_delay_note: remark_parts.append("延期服务费")
+
+            new_row = {
+                '业务订单号': oid_clean,
+                '产品名称': info.get('产品名称', ''),
+                '收款商户': info.get('收款商户', ''),
+                '付款人': info.get('付款人', ''),
+                '分期金额': info.get('分期金额', 0),
+                '还款期次': period_type, # 使用精准匹配到的期次
+                '支付时间': final_pay_time,
+                '服务费': total_service,
+                '逾期费用': total_overdue,
+                '还款方式': '线下代付',
+                '下单时间': info.get('下单时间', ''),
+                '订单状态': info.get('订单状态', ''),
+                '维护商务': info.get('维护商务', ''),
+                '备注': "，".join(remark_parts)
+            }
+            res_list.append(new_row)
+
+    df_all = pd.DataFrame(res_list)
+
+    # --- 5. 计算返佣 ---
+    print("正在合并数据并计算返佣...")
+    comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
+    df_all['是否有返佣'] = comm_results[0]
+    df_all['返佣比例'] = comm_results[1]
+    df_all['返佣金额'] = comm_results[2]
+
+    # --- 6. 补充日期备注 ---
+    def check_date_and_adjust(row):
+        order_time_str = str(row.get('下单时间', '')).strip()
+        merchant = str(row.get('收款商户', '')).strip()
+        product = str(row.get('产品名称', '')).strip()
+        current_remarks = row['备注']
+        if pd.isna(current_remarks): current_remarks = ""
+        
+        key = f"{merchant}_{product}"
+        policy = policy_map.get(key, {})
+        policy_start_str = str(policy.get('返佣开始时间', '')).strip()
+        
+        if order_time_str and order_time_str != 'nan' and policy_start_str and policy_start_str != 'nan':
             try:
-                order_time = pd.to_datetime(order_time_str)
-                policy_time = pd.to_datetime(policy_start_date)
-                if order_time < policy_time:
-                    note_parts.append("下单早于政策")
-            except:
-                pass
-            
-    res['备注'] = " | ".join(note_parts)
-    
-    return res
+                o_date = pd.to_datetime(order_time_str).date()
+                p_date = pd.to_datetime(policy_start_str).date()
+                if o_date < p_date:
+                    if current_remarks: current_remarks += "，下单早于政策"
+                    else: current_remarks = "下单早于政策"
+                    # 更新 DataFrame 中的值
+                    idx = row.name
+                    df_all.at[idx, '返佣金额'] = 0.0
+                    df_all.at[idx, '是否有返佣'] = '否'
+            except Exception: pass
+        return current_remarks
 
-# ================= Streamlit 界面交互 =================
+    df_all['备注'] = df_all.apply(check_date_and_adjust, axis=1)
 
-st.sidebar.header("1. 文件上传区")
-order_file = st.sidebar.file_uploader("上传【订单主表】(xlsx)", type=['xlsx', 'xls'])
-detail_file = st.sidebar.file_uploader("上传【订单支付明细】(xlsx)", type=['xlsx', 'xls'])
-offline_file = st.sidebar.file_uploader("上传【线下代付记录】(xls)", type=['xlsx', 'xls'])
-online_file = st.sidebar.file_uploader("上传【线上分账支付记录】(xlsx)", type=['xlsx', 'xls'])
-policy_file = st.sidebar.file_uploader("上传【返佣政策详情】(xlsx)", type=['xlsx', 'xls'])
+    # --- 7. 导出 ---
+    df_out = df_all[FINAL_COLUMNS]
+    with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
+        df_out.to_excel(writer, index=False, sheet_name='返佣计算结果')
+    print(f"\n[成功] 计算完成！结果已保存至: {OUTPUT_FILE}")
+    print(f" 总行数: {len(df_out)}")
 
-if st.sidebar.button("开始计算"):
-    if order_file and detail_file and offline_file and online_file and policy_file:
-        try:
-            with st.spinner("正在读取文件..."):
-                df_order = pd.read_excel(order_file)
-                df_detail = pd.read_excel(detail_file)
-                df_offline = pd.read_excel(offline_file)
-                df_online = pd.read_excel(online_file)
-                df_policy = pd.read_excel(policy_file)
-            
-            st.success("文件读取成功，正在建立映射...")
-            
-            with st.spinner("正在处理数据..."):
-                result_df = process_data(df_order, df_detail, df_offline, df_online, df_policy)
-            
-            st.success(f"处理完成！共生成 {len(result_df)} 条有效记录。")
-            
-            st.dataframe(result_df)
-            
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                result_df.to_excel(writer, index=False, sheet_name='返佣计算结果')
-            
-            st.download_button(
-                label="下载处理后的 Excel 文件",
-                data=output.getvalue(),
-                file_name="返佣计算结果_V30.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-        except Exception as e:
-            st.error(f"发生错误: {str(e)}")
-            import traceback
-            st.code(traceback.format_exc())
-    else:
-        st.warning("请上传所有必需的 5 个文件后再点击开始计算。")
+if __name__ == '__main__':
+    process_data()
