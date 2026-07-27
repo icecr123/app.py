@@ -16,8 +16,9 @@ st.markdown("""
 2.  **延期服务费特殊处理**：
     *   **不占期次**：识别到“延期服务费”时，不消耗顺序计数器。
     *   **置空与备注**：直接将【还款期次】置空，并在备注中标记。
-3.  **无效记录清洗**：
-    *   自动删除【线下代付】中服务费和逾期费用均为 0 的无效行。
+3.  **数据清洗与合并**：
+    *   **无效删除**：自动删除【线下代付】中服务费和逾期费用均为 0 的无效行。
+    *   **费用归集（新增）**：若同一订单出现“仅含逾期费”的行，自动将其合并至该订单的上一行记录中。
 """)
 
 # --- 核心逻辑函数 ---
@@ -137,19 +138,14 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     detail_queue_map = {}
     
     if not df_detail.empty:
-        # 确保有时间列用于排序
         time_col = '支付时间'
         if '支付时间' in df_detail.columns:
-            # 尝试转换时间格式以便排序
             df_detail['sort_time'] = pd.to_datetime(df_detail['支付时间'], errors='coerce')
             df_detail = df_detail.sort_values(by=['订单编号', 'sort_time'])
             
-        # 按订单分组，提取还款类型列表
         grouped_details = df_detail.groupby('订单编号')
         for oid, group in grouped_details:
             clean_oid = clean_order_id(oid)
-            # 提取还款类型列，转为列表
-            # 假设列名为 '还款类型'，请根据实际文件调整
             type_list = group['还款类型'].fillna('').astype(str).tolist()
             detail_queue_map[clean_oid] = type_list
 
@@ -201,12 +197,8 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     # 4. 处理代付记录 (线下 - 顺序匹配版)
     # --- V33 核心：线下代付顺序匹配 ---
     if not df_payment_raw.empty:
-        # 全局计数器，记录每个订单号已经匹配了多少次（用于索引队列）
-        # 结构: { '订单号': 2 } 表示该订单号已经匹配了2次
         offline_counter = {}
         
-        # 按 业务订单号 + 支付批次号 分组
-        # 注意：这里假设 '业务订单号' 和 '支付批次号' 是 df_payment_raw 中的列名
         group_cols = ['业务订单号', '支付批次号']
         if not all(col in df_payment_raw.columns for col in group_cols):
             st.error("代付记录表中缺少 '业务订单号' 或 '支付批次号' 列，请检查表头。")
@@ -220,7 +212,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             
             total_service, total_overdue, service_time, has_delay_note = 0.0, 0.0, None, False
             
-            # 遍历当前组（同批次）的所有行，累加金额
             for _, r in group.iterrows():
                 note = str(r.get('系统备注', ''))
                 amt = safe_float(r.get('清分金额', 0))
@@ -240,18 +231,13 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             
             # --- V33 核心匹配逻辑 ---
             repayment_type = ""
-            should_increment_counter = True # 默认为True，除非是延期服务费
+            should_increment_counter = True 
             
-            # 1. 检查是否为延期服务费
             if has_delay_note:
-                repayment_type = "" # 置空
-                should_increment_counter = False # 不消耗计数器
+                repayment_type = "" 
+                should_increment_counter = False 
             else:
-                # 2. 正常匹配逻辑
-                # 获取当前订单的计数器位置
                 current_idx = offline_counter.get(oid_clean, 0)
-                
-                # 从预处理的队列中获取对应索引的类型
                 queue = detail_queue_map.get(oid_clean, [])
                 
                 if current_idx < len(queue):
@@ -259,10 +245,8 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 else:
                     repayment_type = f"超出明细范围({current_idx+1})"
                 
-                # 标记需要增加计数器
                 should_increment_counter = True
             
-            # 3. 更新计数器
             if should_increment_counter:
                 offline_counter[oid_clean] = offline_counter.get(oid_clean, 0) + 1
             
@@ -286,16 +270,54 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 
     df_all = pd.DataFrame(res_list)
     
-    # --- V33 新增：清洗无效代付记录 ---
+    # ==========================================
+    # V33 新增：数据清洗与合并工序
+    # ==========================================
     if not df_all.empty:
-        # 定义清洗条件：线下代付 且 服务费和逾期费用都为0
-        condition = (
+        # 1. 删除无效代付记录 (服务费=0 且 逾期费用=0)
+        condition_invalid = (
             (df_all['还款方式'] == '线下代付') & 
             (df_all['服务费'] == 0) & 
             (df_all['逾期费用'] == 0)
         )
-        # 删除满足条件的行
-        df_all = df_all[~condition].reset_index(drop=True)
+        df_all = df_all[~condition_invalid].reset_index(drop=True)
+
+        # 2. 合并同单号特殊费用行
+        # 逻辑：若某行服务费=0 但 逾期费用>0，尝试将其合并到该订单号的上一行
+        rows_to_drop = []
+        
+        # 倒序遍历，避免索引变动影响后续处理
+        for i in range(len(df_all) - 1, -1, -1):
+            row = df_all.iloc[i]
+            oid = row['业务订单号']
+            svc = safe_float(row['服务费'])
+            ovd = safe_float(row['逾期费用'])
+            
+            # 判定条件：服务费为0 且 逾期费用大于0
+            if svc == 0 and ovd > 0:
+                # 向前查找同一订单号的行
+                merged = False
+                for j in range(i - 1, -1, -1):
+                    prev_row = df_all.iloc[j]
+                    if prev_row['业务订单号'] == oid:
+                        # 执行合并：将当前行的逾期费加到上一行
+                        prev_ovd = safe_float(prev_row['逾期费用'])
+                        df_all.at[j, '逾期费用'] = prev_ovd + ovd
+                        
+                        # 可选：更新备注，标记已合并
+                        prev_remark = str(df_all.at[j, '备注'])
+                        curr_remark = str(row['备注'])
+                        if curr_remark and curr_remark != 'nan':
+                            df_all.at[j, '备注'] = prev_remark + "，含合并逾期费"
+                        
+                        # 标记当前行待删除
+                        rows_to_drop.append(i)
+                        merged = True
+                        break
+                
+        # 执行删除操作
+        if rows_to_drop:
+            df_all = df_all.drop(rows_to_drop).reset_index(drop=True)
 
     # 5. 计算返佣
     if not df_all.empty:
@@ -305,34 +327,6 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         df_all['返佣金额'] = comm_results[2]
         
         # 6. 补充日期备注与校验
-        def check_date_and_adjust(row):
-            order_time_str = str(row.get('下单时间', '')).strip()
-            merchant = str(row.get('收款商户', '')).strip()
-            product = str(row.get('产品名称', '')).strip()
-            current_remarks = row['备注']
-            if pd.isna(current_remarks):
-                current_remarks = ""
-                
-            key = f"{merchant}_{product}"
-            policy = policy_map.get(key, {})
-            policy_start_str = str(policy.get('返佣开始时间', '')).strip()
-            
-            if order_time_str and order_time_str != 'nan' and policy_start_str and policy_start_str != 'nan':
-                try:
-                    o_date = pd.to_datetime(order_time_str).date()
-                    p_date = pd.to_datetime(policy_start_str).date()
-                    if o_date < p_date:
-                        current_remarks = ("，下单早于政策" if current_remarks else "下单早于政策")
-                        # 注意：这里直接修改df_all需要小心，最好在apply外处理或使用loc
-                        # 为了简化，这里仅返回备注文本，金额调整在下一步做
-                except Exception:
-                    pass
-            return current_remarks
-            
-        # 重新计算备注（包含日期校验信息）
-        # df_all['备注'] = df_all.apply(check_date_and_adjust, axis=1)
-        
-        # 简单的日期校验逻辑（修正返佣金额）
         for idx, row in df_all.iterrows():
              order_time_str = str(row.get('下单时间', '')).strip()
              merchant = str(row.get('收款商户', '')).strip()
