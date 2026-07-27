@@ -16,8 +16,8 @@ st.markdown("""
 2.  **延期服务费特殊处理**：
     *   **不占期次**：识别到“延期服务费”时，不消耗顺序计数器。
     *   **置空与备注**：直接将【还款期次】置空，并在备注中标记。
-3.  **代付合并逻辑**：
-    *   同批次下的服务费与罚息自动合并计算。
+3.  **无效记录清洗**：
+    *   自动删除【线下代付】中服务费和逾期费用均为 0 的无效行。
 """)
 
 # --- 核心逻辑函数 ---
@@ -286,6 +286,17 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
 
     df_all = pd.DataFrame(res_list)
     
+    # --- V33 新增：清洗无效代付记录 ---
+    if not df_all.empty:
+        # 定义清洗条件：线下代付 且 服务费和逾期费用都为0
+        condition = (
+            (df_all['还款方式'] == '线下代付') & 
+            (df_all['服务费'] == 0) & 
+            (df_all['逾期费用'] == 0)
+        )
+        # 删除满足条件的行
+        df_all = df_all[~condition].reset_index(drop=True)
+
     # 5. 计算返佣
     if not df_all.empty:
         comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
