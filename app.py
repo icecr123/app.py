@@ -8,6 +8,11 @@ import io
 st.set_page_config(page_title="回款返佣计算小工具 ", layout="centered")
 st.title("🧮 月度回款返佣自动计算工具 ")
 
+st.markdown("""
+<div style='background-color:#e8f5e9; padding:10px; border-radius:5px; border:1px solid #c8e6c9;'>
+</div>
+""", unsafe_allow_html=True)
+
 # 时间控制器
 col_year, col_month = st.columns(2)
 with col_year:
@@ -339,11 +344,12 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         # 删除辅助列
         df_all.drop(columns=['支付时间_dt', 'year_month'], inplace=True)
 
-        # 6. 计算返佣
-        comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
-        df_all['是否有返佣'] = comm_results[0]
-        df_all['返佣比例'] = comm_results[1]
-        df_all['返佣金额'] = comm_results[2]
+       # 6. 计算返佣
+comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
+# 修正：使用 .iloc 按位置索引行，而不是用 [] 索引列
+df_all['是否有返佣'] = comm_results.iloc[:, 0]
+df_all['返佣比例'] = comm_results.iloc[:, 1]
+df_all['返佣金额'] = comm_results.iloc[:, 2]
 
         # 7. 补充日期备注与校验
         for idx, row in df_all.iterrows():
