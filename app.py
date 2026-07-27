@@ -5,22 +5,13 @@ import re
 import io
 
 # --- 页面配置与时间控制器 ---
-st.set_page_config(page_title="返佣计算小工具 V34", layout="centered")
-st.title("🧮 月度回款返佣自动计算工具 (V34 - 修复版)")
-
-st.markdown("""
-<div style='background-color:#e8f5e9; padding:10px; border-radius:5px; border:1px solid #c8e6c9;'>
-<b>✅ V34 核心修复：</b><br>
-1. <b>修复 KeyError：</b>已更正“订单支付明细”中的时间列为 <code>支付成功时间</code>。<br>
-2. <b>双重模糊匹配：</b>采用 <code>业务订单号</code> + <code>支付成功时间(±60s)</code> 联合匹配，解决分钟/秒数不一致问题。<br>
-3. <b>精准定位：</b>匹配成功后自动回填“还款期次”与“还款类型”。
-</div>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="回款返佣计算小工具 ", layout="centered")
+st.title("🧮 月度回款返佣自动计算工具 ")
 
 # 时间控制器
 col_year, col_month = st.columns(2)
 with col_year:
-    selected_year = st.selectbox("选择年份", [2023, 2024, 2025, 2026], index=2)
+    selected_year = st.selectbox("选择年份", [2023, 2024, 2025, 2026, 2027, 2028, 2029], index=2)
 with col_month:
     selected_month = st.selectbox("选择月份", list(range(1, 13)), index=6) # 默认7月
 
@@ -290,7 +281,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '支付时间': final_pay_time,
                 '服务费': total_service,
                 '逾期费用': total_overdue,
-                '还款方式': '线下代付',
+                '还款方式': '线下还款',
                 '下单时间': info.get('下单时间', ''),
                 '订单状态': info.get('订单状态', ''),
                 '维护商务': info.get('维护商务', ''),
@@ -306,7 +297,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     if not df_all.empty:
         # 1. 删除无效代付记录
         condition_invalid = (
-            (df_all['还款方式'] == '线下代付') & 
+            (df_all['还款方式'] == '线下还款') & 
             (df_all['服务费'] == 0) & 
             (df_all['逾期费用'] == 0)
         )
