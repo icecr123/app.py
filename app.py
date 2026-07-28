@@ -7,7 +7,6 @@ import io
 # --- 页面配置与时间控制器 ---
 st.set_page_config(page_title="回款返佣计算小工具 ", layout="centered")
 st.title("🧮 月度回款返佣自动计算工具 ")
-
 st.markdown("""
 <div style='background-color:#e8f5e9; padding:10px; border-radius:5px; border:1px solid #c8e6c9;'>
 </div>
@@ -72,16 +71,16 @@ def calculate_commission(row, policy_map):
     
     if not policy:
         return pd.Series(['否', '0.0000', 0.0])
-
+        
     is_xy, x_val, y_val = parse_xy_product(product)
     ratio = 0.0
     has_comm = '否'
-
+    
     if not period_str:
         return pd.Series(['否', '0.0000', 0.0])
-
+        
     p_num = count_periods(period_str)
-
+    
     if is_xy:
         last_period = 0
         numbers = re.findall(r'\d+', period_str)
@@ -93,11 +92,12 @@ def calculate_commission(row, policy_map):
             raw_ratio = policy.get('Y-返佣', 0)
     else:
         raw_ratio = policy.get('等额-返佣', 0)
-
+        
     ratio = safe_float(raw_ratio)
+    
     if ratio > 0:
         has_comm = '是'
-    
+        
     comm_amount = 0.0
     if ratio > 0 and amount > 0:
         comm_amount = amount * ratio * p_num
@@ -112,7 +112,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     df_order = pd.read_excel(order_file, dtype=str)
     df_detail = pd.read_excel(detail_file, dtype=str)
     df_policy_raw = pd.read_excel(policy_file, dtype=str)
-
+    
     # 2. 预处理：建立映射字典
     order_map = {}
     for _, row in df_order.iterrows():
@@ -127,7 +127,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '收款商户': row.get('机构简称', ''),
                 '分期金额': row.get('分期金额', 0)
             }
-
+            
     # --- V34 核心：构建明细队列 (Detail Queue) ---
     detail_queue_map = {}
     detail_time_map = {} # 新增：用于存储每个订单的支付时间列表，用于模糊匹配
@@ -136,13 +136,12 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         # 【修复点1】：使用正确的列名 '支付成功时间'
         time_col = '支付成功时间'
         order_col = '订单编号'
-        
         if time_col in df_detail.columns and order_col in df_detail.columns:
             # 转换时间格式
             df_detail['sort_time'] = pd.to_datetime(df_detail[time_col], errors='coerce')
             df_detail = df_detail.sort_values(by=[order_col, 'sort_time'])
-            
             grouped_details = df_detail.groupby(order_col)
+            
             for oid, group in grouped_details:
                 clean_oid = clean_order_id(oid)
                 # 存储还款类型列表
@@ -154,7 +153,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         else:
             st.error(f"错误：在《订单支付明细》中找不到 '{order_col}' 或 '{time_col}' 列，请检查表头。")
             return pd.DataFrame()
-
+            
     # 政策映射
     policy_map = {}
     for _, row in df_policy_raw.iterrows():
@@ -168,7 +167,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 'Y-返佣': row.get('Y-返佣', 0),
                 '返佣开始时间': str(row.get('返佣开始时间', '')).strip()
             }
-
+            
     # 3. 处理分账记录 (线上)
     res_list = []
     for _, row in df_ledger.iterrows():
@@ -196,7 +195,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             '备注': "，".join(remark_parts)
         }
         res_list.append(new_row)
-
+        
     # 4. 处理代付记录 (线下 - 模糊匹配版)
     if not df_payment_raw.empty:
         offline_counter = {}
@@ -224,12 +223,12 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                     total_overdue += amt
                 if '延期服务费' in note:
                     has_delay_note = True
-
+                    
             final_pay_time = service_time if service_time else group.iloc[0].get('完成时间', '')
             remark_parts = ["延期服务费"] if has_delay_note else []
             repayment_type = ""
             should_increment_counter = True
-
+            
             if has_delay_note:
                 repayment_type = ""
                 should_increment_counter = False
@@ -275,7 +274,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                             repayment_type = f"超出明细范围({current_idx+1})"
                 else:
                     repayment_type = "无明细数据"
-
+                    
             new_row = {
                 '业务订单号': oid_clean,
                 '产品名称': info.get('产品名称', ''),
@@ -293,9 +292,9 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                 '备注': "，".join(remark_parts)
             }
             res_list.append(new_row)
-
+            
     df_all = pd.DataFrame(res_list)
-
+    
     # ==========================================
     # V34 数据清洗与合并工序
     # ==========================================
@@ -307,7 +306,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             (df_all['逾期费用'] == 0)
         )
         df_all = df_all[~condition_invalid].reset_index(drop=True)
-
+        
         # 2. 合并同单号特殊费用行
         rows_to_drop = []
         for i in range(len(df_all) - 1, -1, -1):
@@ -315,6 +314,7 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             oid = row['业务订单号']
             svc = safe_float(row['服务费'])
             ovd = safe_float(row['逾期费用'])
+            
             if svc == 0 and ovd > 0:
                 for j in range(i - 1, -1, -1):
                     prev_row = df_all.iloc[j]
@@ -327,9 +327,10 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                             df_all.at[j, '备注'] = prev_remark + "，含合并逾期费"
                         rows_to_drop.append(i)
                         break
+                        
         if rows_to_drop:
             df_all = df_all.drop(rows_to_drop).reset_index(drop=True)
-
+            
     # ==========================================
     # 5. 时间过滤 (按选择的年月过滤支付时间)
     # ==========================================
@@ -343,14 +344,14 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         df_all = df_all[df_all['year_month'] == target_period].reset_index(drop=True)
         # 删除辅助列
         df_all.drop(columns=['支付时间_dt', 'year_month'], inplace=True)
-
-       # 6. 计算返佣
+        
+        # 6. 计算返佣
         comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
         # 修正：使用 .iloc 按位置索引行，而不是用 [] 索引列
-            df_all['是否有返佣'] = comm_results.iloc[:, 0]
-            df_all['返佣比例'] = comm_results.iloc[:, 1]
-            df_all['返佣金额'] = comm_results.iloc[:, 2]
-
+        df_all['是否有返佣'] = comm_results.iloc[:, 0]
+        df_all['返佣比例'] = comm_results.iloc[:, 1]
+        df_all['返佣金额'] = comm_results.iloc[:, 2]
+        
         # 7. 补充日期备注与校验
         for idx, row in df_all.iterrows():
             order_time_str = str(row.get('下单时间', '')).strip()
@@ -370,7 +371,9 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
                         df_all.at[idx, '是否有返佣'] = '否'
                 except Exception:
                     pass
-        return df_all
+                    
+    return df_all
+
     return pd.DataFrame()
 
 # --- 网页界面部分 ---
@@ -385,22 +388,26 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
         with st.spinner('数据正在飞速计算中，请稍候...'):
             try:
                 result_df = process_data(
-                    uploaded_ledger,
-                    uploaded_payment,
-                    uploaded_order,
-                    uploaded_detail,
-                    uploaded_policy,
-                    selected_year,
+                    uploaded_ledger, 
+                    uploaded_payment, 
+                    uploaded_order, 
+                    uploaded_detail, 
+                    uploaded_policy, 
+                    selected_year, 
                     selected_month
                 )
+                
                 FINAL_COLUMNS = [
-                    '业务订单号', '产品名称', '收款商户', '付款人', '分期金额', '还款期次',
-                    '支付时间', '服务费', '逾期费用', '还款方式', '下单时间', '订单状态',
-                    '维护商务', '是否有返佣', '返佣比例', '返佣金额', '备注'
+                    '业务订单号', '产品名称', '收款商户', '付款人', '分期金额', 
+                    '还款期次', '支付时间', '服务费', '逾期费用', '还款方式', 
+                    '下单时间', '订单状态', '维护商务', '是否有返佣', '返佣比例', 
+                    '返佣金额', '备注'
                 ]
+                
                 for col in FINAL_COLUMNS:
                     if col not in result_df.columns:
                         result_df[col] = ""
+                        
                 result_df = result_df[FINAL_COLUMNS]
                 
                 output = io.BytesIO()
