@@ -345,11 +345,11 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
         df_all.drop(columns=['支付时间_dt', 'year_month'], inplace=True)
 
        # 6. 计算返佣
-comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
-# 修正：使用 .iloc 按位置索引行，而不是用 [] 索引列
-df_all['是否有返佣'] = comm_results.iloc[:, 0]
-df_all['返佣比例'] = comm_results.iloc[:, 1]
-df_all['返佣金额'] = comm_results.iloc[:, 2]
+        comm_results = df_all.apply(lambda row: calculate_commission(row, policy_map), axis=1)
+        # 修正：使用 .iloc 按位置索引行，而不是用 [] 索引列
+            df_all['是否有返佣'] = comm_results.iloc[:, 0]
+            df_all['返佣比例'] = comm_results.iloc[:, 1]
+            df_all['返佣金额'] = comm_results.iloc[:, 2]
 
         # 7. 补充日期备注与校验
         for idx, row in df_all.iterrows():
