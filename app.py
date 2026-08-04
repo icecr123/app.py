@@ -299,6 +299,9 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     # V34 数据清洗与合并工序
     # ==========================================
     if not df_all.empty:
+        # 【修复】新增：提前解析支付时间的年月，用于合并时的同月检查
+        df_all['_pay_period'] = pd.to_datetime(df_all['支付时间'], errors='coerce').dt.to_period('M')
+        
         # 1. 删除无效代付记录
         condition_invalid = (
             (df_all['还款方式'] == '线下还款') & 
@@ -314,23 +317,30 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
             oid = row['业务订单号']
             svc = safe_float(row['服务费'])
             ovd = safe_float(row['逾期费用'])
+            curr_period = row['_pay_period']  # 【修复】获取当前行的年月
             
             if svc == 0 and ovd > 0:
                 for j in range(i - 1, -1, -1):
                     prev_row = df_all.iloc[j]
                     if prev_row['业务订单号'] == oid:
-                        prev_ovd = safe_float(prev_row['逾期费用'])
-                        df_all.at[j, '逾期费用'] = prev_ovd + ovd
-                        prev_remark = str(df_all.at[j, '备注'])
-                        curr_remark = str(row['备注'])
-                        if curr_remark and curr_remark != 'nan':
-                            df_all.at[j, '备注'] = prev_remark + "，含合并逾期费"
-                        rows_to_drop.append(i)
-                        break
-                        
+                        # 【修复】只合并同月的记录，防止跨月逾期费被错误合并到不同月份的行中
+                        if prev_row['_pay_period'] == curr_period:
+                            prev_ovd = safe_float(prev_row['逾期费用'])
+                            df_all.at[j, '逾期费用'] = prev_ovd + ovd
+                            prev_remark = str(df_all.at[j, '备注'])
+                            curr_remark = str(row['备注'])
+                            if curr_remark and curr_remark != 'nan':
+                                df_all.at[j, '备注'] = prev_remark + "，含合并逾期费"
+                            rows_to_drop.append(i)
+                            break
+                        # 【修复】如果月份不同，跳过不合并，继续向前查找
+                            
         if rows_to_drop:
             df_all = df_all.drop(rows_to_drop).reset_index(drop=True)
-            
+        
+        # 【修复】删除辅助列
+        df_all.drop(columns=['_pay_period'], inplace=True)
+        
     # ==========================================
     # 5. 时间过滤 (按选择的年月过滤支付时间)
     # ==========================================
@@ -384,7 +394,7 @@ uploaded_detail = st.file_uploader("4. 上传《订单支付明细.xlsx》", typ
 uploaded_policy = st.file_uploader("5. 上传《返佣政策详情.xls》", type=['xls', 'xlsx'])
 
 if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uploaded_policy]):
-    if st.button('🚀 开始计算', type='primary'):
+    if st.button(' 🚀开始计算', type='primary'):
         with st.spinner('数据正在飞速计算中，请稍候...'):
             try:
                 result_df = process_data(
@@ -417,7 +427,7 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                 
                 st.success(f"计算完成！当前输出范围：{selected_year}年{selected_month}月")
                 st.download_button(
-                    label="💾 点击下载计算结果",
+                    label=" 💾点击下载计算结果",
                     data=processed_data,
                     file_name=f"月度回款返佣计算结果_{selected_year}{selected_month:02d}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
