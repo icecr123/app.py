@@ -12,12 +12,26 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# 时间控制器
-col_year, col_month = st.columns(2)
-with col_year:
-    selected_year = st.selectbox("选择年份", [2023, 2024, 2025, 2026, 2027, 2028, 2029], index=2)
-with col_month:
-    selected_month = st.selectbox("选择月份", list(range(1, 13)), index=6)  # 默认7月
+# 时间控制器：支持一次输出多个年月（起止区间，可跨月/跨年）
+YEARS = [2023, 2024, 2025, 2026, 2027, 2028, 2029]
+MONTHS = list(range(1, 13))
+
+st.markdown("#### 计算月份范围（一次输出区间内所有月份）")
+c_start, c_end = st.columns(2)
+with c_start:
+    st.markdown("**开始年月**")
+    csy, csm = st.columns(2)
+    with csy:
+        start_year = st.selectbox("开始年份", YEARS, index=3)     # 默认 2026
+    with csm:
+        start_month = st.selectbox("开始月份", MONTHS, index=0)   # 默认 1月
+with c_end:
+    st.markdown("**结束年月**")
+    cey, cem = st.columns(2)
+    with cey:
+        end_year = st.selectbox("结束年份", YEARS, index=3)       # 默认 2026
+    with cem:
+        end_month = st.selectbox("结束月份", MONTHS, index=9)     # 默认 10月
 
 
 # --- 核心逻辑函数 ---
@@ -139,7 +153,8 @@ def calculate_commission(row, policy_map):
 
 
 # --- 主处理流程 ---
-def process_data(ledger_file, payment_file, order_file, detail_file, policy_file, year, month):
+def process_data(ledger_file, payment_file, order_file, detail_file, policy_file,
+                 start_year, start_month, end_year, end_month):
     # 1. 读取所有文件
     df_ledger = pd.read_excel(ledger_file, dtype=str)
     df_payment_raw = pd.read_excel(payment_file, dtype=str)
@@ -397,11 +412,12 @@ def process_data(ledger_file, payment_file, order_file, detail_file, policy_file
     if not df_all.empty:
         # 将支付时间转换为 datetime 格式
         df_all['支付时间_dt'] = pd.to_datetime(df_all['支付时间'], errors='coerce')
-        # 提取年月，过滤数据
+        # 提取年月，过滤数据（保留起止区间内的所有月份）
         df_all['year_month'] = df_all['支付时间_dt'].dt.to_period('M')
-        target_period = pd.Period(f"{year}-{month:02d}", freq='M')
-        # 仅保留目标月份的数据
-        df_all = df_all[df_all['year_month'] == target_period].reset_index(drop=True)
+        start_period = pd.Period(f"{start_year}-{start_month:02d}", freq='M')
+        end_period = pd.Period(f"{end_year}-{end_month:02d}", freq='M')
+        # 仅保留目标月份区间的数据
+        df_all = df_all[(df_all['year_month'] >= start_period) & (df_all['year_month'] <= end_period)].reset_index(drop=True)
         # 删除辅助列
         df_all.drop(columns=['支付时间_dt', 'year_month'], inplace=True)
 
@@ -449,8 +465,10 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                     uploaded_order,
                     uploaded_detail,
                     uploaded_policy,
-                    selected_year,
-                    selected_month
+                    start_year,
+                    start_month,
+                    end_year,
+                    end_month
                 )
 
                 FINAL_COLUMNS = [
@@ -471,11 +489,11 @@ if all([uploaded_ledger, uploaded_payment, uploaded_order, uploaded_detail, uplo
                     result_df.to_excel(writer, index=False, sheet_name='返佣计算结果')
                 processed_data = output.getvalue()
 
-                st.success(f"计算完成！当前输出范围：{selected_year}年{selected_month}月")
+                st.success(f"计算完成！当前输出范围：{start_year}年{start_month}月 ~ {end_year}年{end_month}月")
                 st.download_button(
                     label="💾 点击下载计算结果",
                     data=processed_data,
-                    file_name=f"月度回款返佣计算结果_{selected_year}{selected_month:02d}.xlsx",
+                    file_name=f"月度回款返佣计算结果_{start_year}{start_month:02d}-{end_year}{end_month:02d}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 st.dataframe(result_df.head(10))
